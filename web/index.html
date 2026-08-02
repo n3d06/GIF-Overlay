@@ -9,13 +9,10 @@
     
     <link rel="icon" type="image/x-icon" href="https://raw.githubusercontent.com/duyxyz/GIF-Overlay/refs/heads/main/src/assets/app_icon.ico">
     <link rel="stylesheet" href="style.css">
-    
 </head>
 
-<body>
-
-    <!-- Absolute centered content -->
-    <main class="viewport-main container">
+<body class="markdown-body">
+    <main>
         <div class="center-layout">
             <!-- Information stack -->
             <div class="info-stack">
@@ -121,10 +118,7 @@ namespace GifOverlay
         </div>
     </main>
 
-
-
     <script>
-        // 1. Dynamic Simulator Engine
         const mockSticker = document.getElementById('mock-sticker');
         const slideOpacity = document.getElementById('slide-opacity');
         const txtOpacity = document.getElementById('txt-opacity');
@@ -143,9 +137,6 @@ namespace GifOverlay
             mockSticker.style.transform = `scale(${v / 100})`;
         });
 
-
-
-        // 3. Instant clipboard copy
         function doCopy() {
             const cmd = document.getElementById('cmd-text').innerText;
             navigator.clipboard.writeText(cmd).then(() => {
@@ -161,7 +152,6 @@ namespace GifOverlay
             });
         }
 
-        // 4. API sync release data
         async function syncGit() {
             try {
                 const res = await fetch('https://api.github.com/repos/duyxyz/GIF-Overlay/releases/latest');
