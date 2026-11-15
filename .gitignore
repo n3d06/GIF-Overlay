@@ -1,0 +1,34 @@
+## .NET Core
+bin/
+obj/
+*.exe
+*.dll
+*.pdb
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Visual Studio
+.vs/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa]rm/
+[Aa]rm64/
+
+## OS specific
+.DS_Store
+Thumbs.db
+
+## GIF Overlay Specific
+settings.json
+crash_log.txt
+err.txt
+
+## AI / Agents
+.agents/
+skills-lock.json
+## Rust
+/target/
