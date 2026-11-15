@@ -1,177 +1,60 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="GIF Overlay is a minimalist hardware-accelerated desktop media viewer for Windows. Pin GIFs and images with custom transparency.">
-    <title>GIF Overlay — Minimalist Media Viewer</title>
-    
-    <link rel="icon" type="image/x-icon" href="https://raw.githubusercontent.com/duyxyz/GIF-Overlay/refs/heads/main/src/assets/app_icon.ico">
-    <link rel="stylesheet" href="style.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>GIF Overlay — pin GIFs and images on top of your screen</title>
+  <meta name="description" content="A tiny, free Windows app that pins GIFs and images above your other windows. Borderless, translucent and resizable.">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <script src="main.js" defer></script>
 </head>
 
-<body class="markdown-body">
-    <main>
-        <div class="center-layout">
-            <!-- Information stack -->
-            <div class="info-stack">
-                <div class="hero-tag">
-                    <div class="pulse"></div>
-                    <span id="v-tag">LATEST BUILD</span>
-                </div>
-                <div class="title-layout">
-                    <img src="https://raw.githubusercontent.com/duyxyz/GIF-Overlay/refs/heads/main/src/assets/app_icon.ico" alt="GIF Overlay Icon" class="title-logo">
-                    <h1 class="hero-title">
-                        Overlay media.<br>
-                        <span class="gradient-text">Stay in your flow.</span>
-                    </h1>
-                </div>
-                <p class="hero-subtext">
-                    A quietly-confident, hardware-accelerated GIF and static image viewer for Windows. Pin, scale, and dynamically fade reference assets instantly over any workspace.
-                </p>
-                
-                <div class="feature-bullets">
-                    <span class="f-tag">Always on Top</span>
-                    <span class="f-tag">Zero Borders</span>
-                    <span class="f-tag">GPU Rendering</span>
-                    <span class="f-tag">Click-Through</span>
-                </div>
-                
-                <div class="hero-btns">
-                    <a href="https://github.com/duyxyz/GIF-Overlay/releases" class="btn-base btn-primary" id="dl-btn" target="_blank" rel="noopener">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                            <polyline points="7 10 12 15 17 10"></polyline>
-                            <line x1="12" y1="15" x2="12" y2="3"></line>
-                        </svg>
-                        Get Download
-                    </a>
-                    <a href="https://github.com/duyxyz/GIF-Overlay" class="btn-base btn-secondary" target="_blank" rel="noopener">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
-                        </svg>
-                        GitHub Project
-                    </a>
-                    
-                    <div class="winget-pill">
-                        <svg class="terminal-prompt-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-                            <polyline points="4 17 10 12 4 7"></polyline>
-                            <line x1="12" y1="19" x2="20" y2="19"></line>
-                        </svg>
-                        <code id="cmd-text">winget install gifoverlay</code>
-                        <button class="btn-icon" onclick="doCopy()" aria-label="Copy WinGet cmd">
-                            <svg id="svg-c1" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                            </svg>
-                            <svg id="svg-c2" class="utility-hidden" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                                <polyline points="20 6 9 17 4 12"></polyline>
-                            </svg>
-                        </button>
-                    </div>
-                </div>
-            </div>
+<body>
+  <header class="top">
+    <strong>GIF Overlay</strong>
+    <a href="https://github.com/n3d06/GIF-Overlay">GitHub</a>
+  </header>
 
-            <!-- Simulated Live App Sandbox -->
-            <div class="mockup-platform">
-                <div class="os-window">
-                    <div class="os-toolbar">
-                        <span class="dot red"></span>
-                        <span class="dot yellow"></span>
-                        <span class="dot green"></span>
-                    </div>
-                    <div class="os-editor-bg">using System.Windows;
+  <main>
+    <section class="intro">
+      <div>
+        <h1>Pin GIFs and images on top of your screen.</h1>
+        <p>A tiny, free Windows app. Borderless, translucent and resizable &mdash; about 300&nbsp;KB.</p>
 
-namespace GifOverlay
-{
-    public class Overlay
-    {
-        public void Run() {
-            this.Topmost = true;
-            this.AllowsTransparency = true;
-        }
-    }
-}</div>
-                    <div class="app-overlay-float" id="mock-sticker">
-                        <img src="Cat%20Vibing%20Sticker.gif" alt="Simulated transparent overlay application" class="overlay-media">
-                    </div>
-                </div>
-                
-                <div class="mockup-controls">
-                    <div class="range-row">
-                        <div class="range-label-group">
-                            <span>Desktop Transparency (Opacity)</span>
-                            <span id="txt-opacity">85%</span>
-                        </div>
-                        <input type="range" id="slide-opacity" class="custom-slider" min="10" max="100" value="85" aria-label="Simulate Opacity scale">
-                    </div>
-                    <div class="range-row">
-                        <div class="range-label-group">
-                            <span>Dimension Vector (Scale)</span>
-                            <span id="txt-scale">1.0x</span>
-                        </div>
-                        <input type="range" id="slide-scale" class="custom-slider" min="50" max="150" value="100" aria-label="Simulate rendering dimension scale">
-                    </div>
-                </div>
-            </div>
-        </div>
-    </main>
+        <p class="actions">
+          <a class="button" id="download" href="https://github.com/n3d06/GIF-Overlay/releases/latest">Download for Windows</a>
+        </p>
+        <p class="cmd">
+          <code id="winget">winget install gifoverlay</code>
+          <button type="button" id="copy">Copy</button>
+          <span id="copy-status" class="sr-only" role="status"></span>
+        </p>
+        <p class="small" id="release">Windows 10 / 11 &middot; MIT licensed</p>
+      </div>
+      <img src="Cat%20Vibing%20Sticker.gif" width="236" height="180" alt="A cat in a banana costume dancing">
+    </section>
 
-    <script>
-        const mockSticker = document.getElementById('mock-sticker');
-        const slideOpacity = document.getElementById('slide-opacity');
-        const txtOpacity = document.getElementById('txt-opacity');
-        const slideScale = document.getElementById('slide-scale');
-        const txtScale = document.getElementById('txt-scale');
+    <section>
+      <h2>What it does</h2>
+      <ul>
+        <li>Keeps an image above every other window.</li>
+        <li>Transparent GIFs and PNGs blend in; fade the whole window from 10% to 100%.</li>
+        <li>Drag the corner to scale, or an edge to stretch one side.</li>
+        <li>Open as many images as you like, each in its own window.</li>
+        <li>GIF, PNG, JPG, BMP, TIFF and WebP.</li>
+        <li>A small history dashboard remembers what you opened.</li>
+      </ul>
+      <p class="small">The exe isn&rsquo;t code-signed yet, so Windows SmartScreen may show a warning. The source is public and each release is built by GitHub Actions.</p>
+    </section>
+  </main>
 
-        slideOpacity.addEventListener('input', (e) => {
-            const v = e.target.value;
-            txtOpacity.textContent = `${v}%`;
-            mockSticker.style.opacity = v / 100;
-        });
-
-        slideScale.addEventListener('input', (e) => {
-            const v = e.target.value;
-            txtScale.textContent = `${(v / 100).toFixed(1)}x`;
-            mockSticker.style.transform = `scale(${v / 100})`;
-        });
-
-        function doCopy() {
-            const cmd = document.getElementById('cmd-text').innerText;
-            navigator.clipboard.writeText(cmd).then(() => {
-                const svg1 = document.getElementById('svg-c1');
-                const svg2 = document.getElementById('svg-c2');
-                svg1.classList.add('utility-hidden');
-                svg2.classList.remove('utility-hidden');
-                
-                setTimeout(() => {
-                    svg1.classList.remove('utility-hidden');
-                    svg2.classList.add('utility-hidden');
-                }, 1500);
-            });
-        }
-
-        async function syncGit() {
-            try {
-                const res = await fetch('https://api.github.com/repos/duyxyz/GIF-Overlay/releases/latest');
-                if (res.ok) {
-                    const dat = await res.json();
-                    const tag = document.getElementById('v-tag');
-                    if (tag && dat.tag_name) {
-                        tag.textContent = `RELEASE ${dat.tag_name.toUpperCase()}`;
-                    }
-                    const dBtn = document.getElementById('dl-btn');
-                    if (dat.assets && dat.assets.length > 0) {
-                        const setup = dat.assets.find(a => a.name.endsWith('.exe')) || dat.assets[0];
-                        if (dBtn) dBtn.href = setup.browser_download_url;
-                    }
-                }
-            } catch (c) {}
-        }
-
-        syncGit();
-    </script>
+  <footer>
+    <a href="https://github.com/n3d06/GIF-Overlay">Source</a>
+    <a href="https://github.com/n3d06/GIF-Overlay/releases">Releases</a>
+    <a href="https://github.com/n3d06/GIF-Overlay/issues">Issues</a>
+    <a href="https://github.com/n3d06/GIF-Overlay/blob/main/LICENSE">MIT License</a>
+  </footer>
 </body>
-
 </html>
