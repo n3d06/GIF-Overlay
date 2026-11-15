@@ -8,6 +8,7 @@
 ## ✨ Key Features
 
 - **Native Rust + Win32:** A tiny (~300 KB) single exe, no runtime required.
+- **History Dashboard:** Launching the app directly opens a dashboard of the GIFs you opened before (empty on first run). Double-click an item to show it, `Add GIF...` or drag a file in to add one, press Delete or right-click to remove it. "Open With" skips the dashboard.
 - **Always on Top:** Pin images over other applications—perfect for tracing, references, or desktop decoration.
 - **Translucent Background:** Fully transparent window borders, showing only the image content.
 - **Adjustable Opacity:** Slide to adjust transparency for a see-through effect.
@@ -43,7 +44,8 @@ winget install gifoverlay
     - **Settings:** Access Resizing (Scale, W, H, Opacity) and Transform (Rotate, Flip).
     - **Pause / Play:** Toggle GIF animation.
     - **Reset to Default:** Restore original size and transforms.
-    - **Exit:** Close the application.
+    - **History...:** Open the dashboard while keeping the current GIF.
+    - **Close (back to history):** Close the overlay and return to the dashboard. Close the dashboard window to quit.
 
 ## 🛠 Development
 
