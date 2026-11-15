@@ -40,6 +40,10 @@ on:
         description: 'Only log actions, do not perform any delete operations.'
         required: false
 
+permissions:
+  actions: write   # needed to delete workflow runs
+  contents: read
+
 jobs:
   del_runs:
     runs-on: ubuntu-latest

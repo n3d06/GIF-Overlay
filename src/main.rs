@@ -10,11 +10,11 @@ use std::{
 use windows_sys::Win32::{
     Foundation::*,
     Graphics::Gdi::*,
-    System::{LibraryLoader::GetModuleHandleW, Registry::*},
+    System::{DataExchange::COPYDATASTRUCT, LibraryLoader::GetModuleHandleW, Registry::*, Threading::CreateMutexW},
     UI::{
         Controls::{Dialogs::*, *}, HiDpi::*,
         Input::KeyboardAndMouse::{
-            ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DELETE,
+            EnableWindow, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DELETE,
         },
         Shell::*,
         WindowsAndMessaging::*,
@@ -64,12 +64,16 @@ fn json_val(s: &str, key: &str) -> Option<String> {
     Some(rest.split([',', '\n', '\r', '}']).next()?.trim().to_string())
 }
 
-fn save_settings(a: &App) {
+fn write_settings(opacity: u32, locked: bool) {
     let json = format!(
-        "{{\n  \"Width\": {},\n  \"Height\": {},\n  \"Opacity\": {},\n  \"IsLocked\": {}\n}}",
-        a.w, a.h, a.opacity as f64 / 100.0, a.locked
+        "{{\n  \"Opacity\": {},\n  \"IsLocked\": {},\n  \"DashSort\": {}\n}}",
+        opacity as f64 / 100.0, locked, dash().sort
     );
     let _ = fs::write(exe_file("settings.json"), json);
+}
+
+fn save_settings(a: &App) {
+    write_settings(a.opacity, a.locked);
 }
 
 // ---------- history (history.txt, one path per line, newest first) ----------
@@ -267,6 +271,7 @@ struct App {
     hover: bool, // mouse is over the overlay: show the resize handles
     hot: Zone,   // handle under the cursor (drawn highlighted)
     drag: Option<(Zone, i32, i32, i32, i32)>, // zone, start cursor x, y, start width, height
+    path: String, // absolute path of the image shown (lets the dashboard mark / reuse open windows)
 }
 
 /// Resize handles: the corner keeps the aspect ratio, the edges change one axis only.
@@ -472,6 +477,7 @@ fn apply(a: &mut App, path: &str, (gw, gh, frames, delays): Decoded) {
     a.flip_h = false;
     a.flip_v = false;
     a.paused = false;
+    a.path = path.to_string();
     (a.w, a.h) = fit_size(a);
     render(a);
     schedule_frame(a);
@@ -533,6 +539,7 @@ fn create_overlay(path: &str) -> bool {
             hover: false,
             hot: Zone::None,
             drag: None,
+            path: String::new(),
         }));
         let hwnd = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_APPWINDOW,
@@ -553,10 +560,18 @@ fn create_overlay(path: &str) -> bool {
     true
 }
 
-/// Opens `path` in a new window, records it in the history and hides the dashboard.
+/// Opens `path` in a new window (or brings the window that already shows it to the front),
+/// records it in the history and hides the dashboard.
 fn open_gif(path: &str) -> bool {
     let path = abs_path(path);
-    if !create_overlay(&path) {
+    let existing = overlays().iter().copied().find(|&p| unsafe { (*p).path.eq_ignore_ascii_case(&path) });
+    if let Some(p) = existing {
+        unsafe {
+            let hwnd = (*p).hwnd;
+            ShowWindow(hwnd, SW_SHOW);
+            SetForegroundWindow(hwnd);
+        }
+    } else if !create_overlay(&path) {
         return false;
     }
     history_push(&path);
@@ -810,6 +825,8 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             // closing the last window goes back to the dashboard (unless the app is quitting)
             if overlays().is_empty() {
                 show_dash();
+            } else if IsWindowVisible(dash().hwnd) != 0 {
+                refresh_dash(); // the "open" marks changed
             }
             0
         }
@@ -862,6 +879,10 @@ fn open_default_apps() {
     }
 }
 const IDC_LIST: usize = 1002;
+const IDC_CLEAR: usize = 1004;
+const IDC_SORT: usize = 1005;
+const SORT_RECENT: u8 = 0;
+const SORT_NAME: u8 = 1;
 const IDM_OPEN: usize = 1;
 const IDM_REMOVE: usize = 2;
 
@@ -876,6 +897,9 @@ struct Dash {
     list: HWND,
     add: HWND,
     default_btn: HWND,
+    clear_btn: HWND,
+    sort_box: HWND,
+    sort: u8, // SORT_RECENT (most recently opened first) or SORT_NAME
     empty: HWND,
     scale: f32, // DPI / 96
     tw: usize,  // thumbnail size in pixels
@@ -948,11 +972,20 @@ fn refresh_dash() {
             None => make_thumb(&p, d.tw, d.th),
         })
         .collect();
+    if d.sort == SORT_NAME {
+        d.items.sort_by_key(|t| t.name.to_lowercase());
+    } // SORT_RECENT keeps the history order, which is newest first
+    let open: Vec<String> = overlays().iter().map(|&p| unsafe { (*p).path.clone() }).collect();
+    let is_open = |t: &Thumb| open.iter().any(|p| p.eq_ignore_ascii_case(&t.path));
     unsafe {
         SendMessageW(d.list, LVM_DELETEALLITEMS, 0, 0);
         let himl = ImageList_Create(d.tw as i32, d.th as i32, ILC_COLOR32, d.items.len() as i32, 4);
         for t in &d.items {
-            let bmp = CreateBitmap(d.tw as i32, d.th as i32, 1, 32, t.px.as_ptr() as *const c_void);
+            let mut px = t.px.clone(); // the badge is drawn on a copy so the cached thumbnail stays clean
+            if is_open(t) {
+                draw_open_badge(&mut px, d.tw, d.scale);
+            }
+            let bmp = CreateBitmap(d.tw as i32, d.th as i32, 1, 32, px.as_ptr() as *const c_void);
             ImageList_Add(himl, bmp, null_mut());
             DeleteObject(bmp);
         }
@@ -961,7 +994,8 @@ fn refresh_dash() {
             ImageList_Destroy(prev as HIMAGELIST);
         }
         for (i, t) in d.items.iter().enumerate() {
-            let mut name = wide(&t.name);
+            let label = if is_open(t) { format!("{} (open)", t.name) } else { t.name.clone() };
+            let mut name = wide(&label);
             let mut it: LVITEMW = mem::zeroed();
             it.mask = LVIF_TEXT | LVIF_IMAGE;
             it.iItem = i as i32;
@@ -970,6 +1004,22 @@ fn refresh_dash() {
             SendMessageW(d.list, LVM_INSERTITEMW, 0, &it as *const _ as isize);
         }
         ShowWindow(d.empty, if d.items.is_empty() { SW_SHOW } else { SW_HIDE });
+        EnableWindow(d.clear_btn, (!d.items.is_empty()) as i32);
+    }
+}
+
+/// Green dot with a white ring in the top-right corner of a thumbnail.
+fn draw_open_badge(px: &mut [u32], tw: usize, scale: f32) {
+    let r = 9.0 * scale;
+    let (cx, cy) = (tw as f32 - r - 6.0 * scale, r + 6.0 * scale);
+    let th = px.len() / tw;
+    for y in 0..th {
+        for x in 0..tw {
+            let dist = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+            if dist <= r + 2.0 * scale {
+                px[y * tw + x] = if dist <= r { 0xFF16_A34A } else { 0xFFFF_FFFF };
+            }
+        }
     }
 }
 
@@ -1017,6 +1067,9 @@ fn layout() {
     unsafe {
         MoveWindow(d.add, s(12.0), s(10.0), s(120.0), s(32.0), 1);
         MoveWindow(d.default_btn, s(140.0), s(10.0), s(190.0), s(32.0), 1);
+        MoveWindow(d.clear_btn, s(338.0), s(10.0), s(120.0), s(32.0), 1);
+        // a combo box's height includes its drop-down list
+        MoveWindow(d.sort_box, w - s(12.0 + 190.0), s(10.0), s(190.0), s(160.0), 1);
         MoveWindow(d.list, 0, bar, w, (h - bar).max(0), 1);
         MoveWindow(d.empty, 0, bar + (h - bar) / 2 - s(24.0), w, s(48.0), 1);
     }
@@ -1048,6 +1101,29 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         }
         WM_SETFOCUS => {
             SetFocus(dash().list);
+            0
+        }
+        WM_GETMINMAXINFO => {
+            // keep the toolbar from overlapping itself
+            (*(lp as *mut MINMAXINFO)).ptMinTrackSize.x = (700.0 * dash().scale) as i32;
+            0
+        }
+        WM_COMMAND if wp & 0xFFFF == IDC_CLEAR => {
+            let q = wide("Clear the history list?\nThe image files themselves are not deleted.");
+            if MessageBoxW(hwnd, q.as_ptr(), wide("Clear history").as_ptr(), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES {
+                history_save(&[]);
+                refresh_dash();
+            }
+            0
+        }
+        // CBN_SELCHANGE = 1
+        WM_COMMAND if wp & 0xFFFF == IDC_SORT && (wp >> 16) & 0xFFFF == 1 => {
+            let d = dash();
+            d.sort = SendMessageW(d.sort_box, CB_GETCURSEL, 0, 0).max(0) as u8;
+            let (opacity, locked) = saved_defaults();
+            write_settings(opacity, locked); // remember the choice
+            refresh_dash();
+            SetFocus(d.list);
             0
         }
         WM_COMMAND if wp & 0xFFFF == IDC_DEFAULT => {
@@ -1094,6 +1170,17 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             }
             0
         }
+        // a second launch hands over its file (or nothing) instead of starting another process
+        WM_COPYDATA => {
+            let cds = &*(lp as *const COPYDATASTRUCT);
+            if cds.cbData >= 2 {
+                let s = slice::from_raw_parts(cds.lpData as *const u16, cds.cbData as usize / 2);
+                open_gif(String::from_utf16_lossy(s).trim_end_matches('\0'));
+            } else {
+                show_dash();
+            }
+            1
+        }
         WM_CLOSE => {
             // With overlays on screen the dashboard just hides; otherwise closing it quits.
             if !overlays().is_empty() {
@@ -1129,6 +1216,8 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     };
     let add = child("BUTTON", "Add image\u{2026}", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_ADD);
     let default_btn = child("BUTTON", "Set as default viewer\u{2026}", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_DEFAULT);
+    let clear_btn = child("BUTTON", "Clear history", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_CLEAR);
+    let sort_box = child("COMBOBOX", "", WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | 0x3 /* CBS_DROPDOWNLIST */, IDC_SORT);
     let list = child(
         "SysListView32", "",
         WS_VISIBLE | WS_TABSTOP | (LVS_ICON | LVS_AUTOARRANGE | LVS_SINGLESEL | LVS_SHOWSELALWAYS) as u32,
@@ -1143,13 +1232,21 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     ncm.cbSize = mem::size_of::<NONCLIENTMETRICSW>() as u32;
     SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, ncm.cbSize, &mut ncm as *mut _ as *mut c_void, 0, dpi);
     let font = CreateFontIndirectW(&ncm.lfMessageFont);
-    for c in [add, default_btn, list, empty] {
+    for c in [add, default_btn, clear_btn, sort_box, list, empty] {
         SendMessageW(c, WM_SETFONT, font as usize, 1);
     }
+    let sort = json_val(&fs::read_to_string(exe_file("settings.json")).unwrap_or_default(), "DashSort")
+        .and_then(|v| v.parse::<u8>().ok())
+        .filter(|&v| v == SORT_RECENT || v == SORT_NAME)
+        .unwrap_or(SORT_RECENT);
+    for label in ["Sort: Recently opened", "Sort: Name (A\u{2013}Z)"] {
+        SendMessageW(sort_box, CB_ADDSTRING, 0, wide(label).as_ptr() as isize);
+    }
+    SendMessageW(sort_box, CB_SETCURSEL, sort as usize, 0);
 
     let (tw, th) = (s(144.0) as usize, s(112.0) as usize);
     SendMessageW(list, LVM_SETICONSPACING, 0, ((th as isize + s(60.0) as isize) << 16) | (tw as isize + s(28.0) as isize));
-    *dash() = Dash { hwnd, list, add, default_btn, empty, scale, tw, th, items: Vec::new() };
+    *dash() = Dash { hwnd, list, add, default_btn, clear_btn, sort_box, sort, empty, scale, tw, th, items: Vec::new() };
     DragAcceptFiles(hwnd, 1);
     layout();
 }
@@ -1174,7 +1271,43 @@ unsafe fn register(name: &[u16], proc: WNDPROC, hinst: HINSTANCE) {
     RegisterClassExW(&wc);
 }
 
+/// Single instance: the first process owns a named mutex. A later launch sends its file
+/// (if any) to the running dashboard window, which opens it or comes to the front, and exits.
+unsafe fn forward_to_running_instance() -> bool {
+    // the handle is deliberately never closed: it lives as long as this process
+    CreateMutexW(null(), 0, wide("Local\\GifOverlaySingleInstance").as_ptr());
+    if GetLastError() != ERROR_ALREADY_EXISTS {
+        return false;
+    }
+    let class = wide("GifOverlayDash");
+    let mut target = null_mut();
+    for _ in 0..40 {
+        // the first instance may still be creating its window
+        target = FindWindowW(class.as_ptr(), null());
+        if !target.is_null() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if target.is_null() {
+        return false;
+    }
+    AllowSetForegroundWindow(ASFW_ANY);
+    let path: Vec<u16> = std::env::args()
+        .nth(1)
+        .filter(|p| fs::metadata(p).is_ok())
+        .map(|p| wide(&abs_path(&p)))
+        .unwrap_or_default();
+    let cds = COPYDATASTRUCT { dwData: 1, cbData: (path.len() * 2) as u32, lpData: path.as_ptr() as *mut c_void };
+    let mut result = 0;
+    SendMessageTimeoutW(target, WM_COPYDATA, 0, &cds as *const _ as isize, SMTO_ABORTIFHUNG, 5000, &mut result);
+    true
+}
+
 fn main() {
+    if unsafe { forward_to_running_instance() } {
+        return;
+    }
     unsafe {
         // WIC (static image decoding) needs COM on this thread
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
@@ -1183,6 +1316,9 @@ fn main() {
             list: null_mut(),
             add: null_mut(),
             default_btn: null_mut(),
+            clear_btn: null_mut(),
+            sort_box: null_mut(),
+            sort: SORT_RECENT,
             empty: null_mut(),
             scale: 1.0,
             tw: 0,

@@ -1,34 +1,17 @@
-## .NET Core
-bin/
-obj/
-*.exe
-*.dll
-*.pdb
-*.user
-*.suo
-*.userosscache
-*.sln.docstates
+# Rust
+/target/
 
-## Visual Studio
-.vs/
-[Dd]ebug/
-[Rr]elease/
-x64/
-x86/
-[Aa]rm/
-[Aa]rm64/
+# Installer output (Inno Setup / portable zip)
+/dist/
 
-## OS specific
+# Files the app writes next to the exe while developing
+settings.json
+history.txt
+
+# OS
 .DS_Store
 Thumbs.db
 
-## GIF Overlay Specific
-settings.json
-crash_log.txt
-err.txt
-
-## AI / Agents
+# AI / agents
 .agents/
 skills-lock.json
-## Rust
-/target/

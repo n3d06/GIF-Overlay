@@ -8,7 +8,11 @@
 ## ✨ Key Features
 
 - **Native Rust + Win32:** A tiny (~300 KB) single exe, no runtime required.
+- **Single Instance:** Launching the exe again (or "Open With" on another file) reuses the running app: it brings the dashboard to the front, or opens the file in a new window.
 - **History Dashboard:** Launching the app directly opens a dashboard of the images you opened before (empty on first run). Double-click an item to open it in a new window (you can have several open at once), `Add image...` or drag a file in to add one, press Delete or right-click to remove it. "Open With" skips the dashboard.
+    - Images that already have a window are marked with a green dot and "(open)"; opening one again brings its window to the front instead of duplicating it.
+    - Sort by recently opened or by name (A–Z); the choice is remembered.
+    - `Clear history` empties the list after a confirmation (your image files are never touched).
 - **Always on Top:** Pin images over other applications—perfect for tracing, references, or desktop decoration.
 - **Translucent Background:** Fully transparent window borders, showing only the image content.
 - **Adjustable Opacity:** Slide to adjust transparency for a see-through effect.
