@@ -30,3 +30,5 @@ err.txt
 ## AI / Agents
 .agents/
 skills-lock.json
+## Rust
+/target/

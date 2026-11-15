@@ -11,12 +11,12 @@ Author: duyxyz
 License: MIT
 LicenseUrl: https://github.com/duyxyz/GIF-Overlay/blob/main/LICENSE
 ShortDescription: A high-performance GIF overlay application for Windows.
-Description: GIF-Overlay allows you to display animated GIFs as overlays on your screen with customizable scaling, opacity, and transformation options. Built with WPF for high performance.
+Description: GIF-Overlay allows you to display animated GIFs as overlays on your screen with customizable scaling, opacity, and transformation options. Built with Rust for a tiny footprint.
 Moniker: gifoverlay
 Tags:
   - gif
   - overlay
-  - wpf
+  - rust
   - tool
 ManifestType: defaultLocale
 ManifestVersion: 1.6.0

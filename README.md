@@ -1,13 +1,13 @@
 [![Download GIF-Overlay](https://img.shields.io/sourceforge/dt/gif-overlay.svg)](https://sourceforge.net/projects/gif-overlay/files/latest/download) [![Download GIF-Overlay](https://img.shields.io/sourceforge/dm/gif-overlay.svg)](https://sourceforge.net/projects/gif-overlay/files/latest/download)[![Download GIF-Overlay](https://img.shields.io/sourceforge/dw/gif-overlay.svg)](https://sourceforge.net/projects/gif-overlay/files/latest/download)[![Download GIF-Overlay](https://img.shields.io/sourceforge/dd/gif-overlay.svg)](https://sourceforge.net/projects/gif-overlay/files/latest/download)
 # GIF Overlay - Minimalist GIF & Image Viewer
 
-**GIF Overlay** is a lightweight, high-performance GIF and static image viewer for Windows, built with **C# WPF**. It focuses on minimalism, efficiency, and a premium aesthetic, allowing you to pin images on top of other windows with a unique translucency effect.
+**GIF Overlay** is a lightweight, high-performance GIF and static image viewer for Windows, built with **Rust** and the native Win32 API. It focuses on minimalism, efficiency, and a premium aesthetic, allowing you to pin images on top of other windows with a unique translucency effect.
 
 ![GIF Overlay Demo](src/assets/demo1.gif)
 
 ## ✨ Key Features
 
-- **Native C# WPF:** High performance with modern Windows 11 aesthetics.
+- **Native Rust + Win32:** A tiny (~300 KB) single exe, no runtime required.
 - **Always on Top:** Pin images over other applications—perfect for tracing, references, or desktop decoration.
 - **Translucent Background:** Fully transparent window borders, showing only the image content.
 - **Adjustable Opacity:** Slide to adjust transparency for a see-through effect.
@@ -16,7 +16,7 @@
     - Flip Horizontally/Vertically.
 - **Dynamic Resizing:** 
     - Scale via Ctrl + Mouse Wheel.
-    - Precise adjustments via Width/Height sliders in the context menu.
+    - Preset scale levels (25%–300%) in the context menu.
 - **High DPI Support:** Crisp rendering on all displays (4K, high-scale laptops).
 - **Settings Persistence:** Remembers your last opened GIF, window size, and opacity.
 
@@ -36,7 +36,7 @@ winget install gifoverlay
 
 ### Controls
 - **Move:** Left-click and drag the image (ensure window is unlocked).
-- **Resize:** `Ctrl + Mouse Wheel` to scale or use sliders in Settings.
+- **Resize:** `Ctrl + Mouse Wheel` to scale or pick a preset in Settings.
 - **Context Menu (Right-Click):**
     - **Lock Window:** Prevent accidental moving or resizing.
     - **Change GIF...:** Select a different file.
@@ -49,12 +49,11 @@ winget install gifoverlay
 
 To build from source:
 
-1. Install **Visual Studio 2022** or **.NET 10 SDK**.
+1. Install [Rust](https://rustup.rs) and the Visual Studio C++ Build Tools.
 2. Clone the repository.
-3. Open `src/GifOverlay.Wpf.csproj`.
-4. Build and run:
+3. Build and run:
    ```bash
-   dotnet run --project src
+   cargo run --release -- src/assets/demo1.gif
    ```
 
 ## 📜 License

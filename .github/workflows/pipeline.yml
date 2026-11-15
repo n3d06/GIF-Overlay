@@ -9,16 +9,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Set up .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '10.0.x'
-          cache: true
-          cache-dependency-path: src/GifOverlay.Wpf.csproj
-      - name: Restore
-        run: dotnet restore src/GifOverlay.Wpf.csproj
+      - uses: Swatinem/rust-cache@v2
       - name: Build
-        run: dotnet build src/GifOverlay.Wpf.csproj -c Release
+        run: cargo build --release
 
   # 2. Tự động tạo Tag (chỉ chạy trên main sau khi build thành công)
   create-tag:
@@ -59,12 +52,7 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Set up .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: '10.0.x'
-        cache: true
-        cache-dependency-path: src/GifOverlay.Wpf.csproj
+    - uses: Swatinem/rust-cache@v2
 
     - name: Update Version and Build
       shell: powershell
@@ -76,8 +64,15 @@ jobs:
         (Get-Content $configPath) -replace '#define MyAppVersion ".*"', "#define MyAppVersion `"$tag`"" | Set-Content $configPath
         Write-Host "Updated $configPath to version $tag"
 
-        # 2. Build and Publish with clean version
-        dotnet publish src/GifOverlay.Wpf.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishReadyToRun=true -p:Version=$tag -o dist/GIF-Overlay
+        # 2. Stamp the version into Cargo.toml and build
+        $cargo = (Get-Content Cargo.toml -Raw) -replace '(?m)^version = ".*"', "version = `"$tag`""
+        Set-Content Cargo.toml $cargo -NoNewline
+        cargo build --release
+
+        # 3. Assemble the folder used by the installer and the portable zip
+        New-Item -ItemType Directory -Force dist/GIF-Overlay/assets | Out-Null
+        Copy-Item target/release/GIF-Overlay.exe dist/GIF-Overlay/
+        Copy-Item src/assets/demo1.gif dist/GIF-Overlay/assets/
 
     - name: Portable Zip
       shell: powershell
