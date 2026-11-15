@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 gif = { version = "0.13", default-features = false, features = ["std"] }
+windows = { version = "0.62.2", features = ["Win32_Graphics_Imaging", "Win32_System_Com", "Win32_Foundation"] }
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
