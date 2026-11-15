@@ -13,7 +13,9 @@ use windows_sys::Win32::{
     System::{LibraryLoader::GetModuleHandleW, Registry::*},
     UI::{
         Controls::{Dialogs::*, *}, HiDpi::*,
-        Input::KeyboardAndMouse::{ReleaseCapture, SetFocus, VK_DELETE},
+        Input::KeyboardAndMouse::{
+            ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DELETE,
+        },
         Shell::*,
         WindowsAndMessaging::*,
     },
@@ -104,8 +106,52 @@ fn history_remove(path: &str) {
 
 type Decoded = (usize, usize, Vec<Vec<u32>>, Vec<u32>);
 
-/// Decodes up to `max` frames into full-canvas premultiplied BGRA.
+/// Animated GIFs go through the `gif` crate; every other format (PNG, JPEG, BMP, TIFF, WebP...)
+/// is decoded by the Windows Imaging Component, which adds almost nothing to the exe size.
 fn decode(path: &str, max: usize) -> Result<Decoded, String> {
+    let is_gif = Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("gif"));
+    if is_gif {
+        if let Ok(d) = decode_gif(path, max) {
+            return Ok(d);
+        }
+    }
+    decode_wic(path)
+}
+
+/// First frame as premultiplied BGRA, which is exactly what WIC's 32bppPBGRA gives.
+fn decode_wic(path: &str) -> Result<Decoded, String> {
+    use windows::{
+        core::HSTRING,
+        Win32::{
+            Foundation::GENERIC_READ,
+            Graphics::Imaging::*,
+            System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
+        },
+    };
+    let e = |e: windows::core::Error| e.message();
+    unsafe {
+        let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).map_err(e)?;
+        let decoder = factory
+            .CreateDecoderFromFilename(&HSTRING::from(path), None, GENERIC_READ, WICDecodeMetadataCacheOnDemand)
+            .map_err(e)?;
+        let frame = decoder.GetFrame(0).map_err(e)?;
+        let conv = factory.CreateFormatConverter().map_err(e)?;
+        conv.Initialize(&frame, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom)
+            .map_err(e)?;
+        let (mut w, mut h) = (0u32, 0u32);
+        conv.GetSize(&mut w, &mut h).map_err(e)?;
+        if w == 0 || h == 0 {
+            return Err("empty image".into());
+        }
+        let mut px = vec![0u32; w as usize * h as usize];
+        conv.CopyPixels(null(), w * 4, slice::from_raw_parts_mut(px.as_mut_ptr() as *mut u8, px.len() * 4))
+            .map_err(e)?;
+        Ok((w as usize, h as usize, vec![px], vec![100]))
+    }
+}
+
+/// Decodes up to `max` frames into full-canvas premultiplied BGRA.
+fn decode_gif(path: &str, max: usize) -> Result<Decoded, String> {
     let file = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut opts = gif::DecodeOptions::new();
     opts.set_color_output(gif::ColorOutput::RGBA);
@@ -168,8 +214,10 @@ fn sample(f: &[u32], gw: usize, gh: usize, x: f32, y: f32) -> u32 {
 }
 
 fn open_dialog(owner: HWND) -> Option<String> {
-    let filter: Vec<u16> = "GIF Files\0*.gif\0\0".encode_utf16().collect();
-    let title = wide("Select GIF File");
+    let filter: Vec<u16> = "Images\0*.gif;*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp\0GIF Files\0*.gif\0All Files\0*.*\0\0"
+        .encode_utf16()
+        .collect();
+    let title = wide("Select Image");
     let mut buf = [0u16; 1024];
     unsafe {
         let mut ofn: OPENFILENAMEW = mem::zeroed();
@@ -216,13 +264,54 @@ struct App {
     h: i32,
     opacity: u32, // percent
     locked: bool,
+    hover: bool, // mouse is over the overlay: show the resize handles
+    hot: Zone,   // handle under the cursor (drawn highlighted)
+    drag: Option<(Zone, i32, i32, i32, i32)>, // zone, start cursor x, y, start width, height
 }
 
-static mut APP: Option<App> = None;
+/// Resize handles: the corner keeps the aspect ratio, the edges change one axis only.
+#[derive(Clone, Copy, PartialEq)]
+enum Zone {
+    None,
+    Corner,
+    Right,
+    Bottom,
+}
 
-// Single UI thread; the window procedures are the only callers.
-fn app() -> &'static mut App {
-    unsafe { (*addr_of_mut!(APP)).as_mut().unwrap() }
+// One `App` per overlay window, owned through the window's GWLP_USERDATA pointer.
+// The UI is single threaded; this list only tells us how many overlays are open.
+static mut OVERLAYS: Vec<*mut App> = Vec::new();
+
+fn overlays() -> &'static mut Vec<*mut App> {
+    unsafe { &mut *addr_of_mut!(OVERLAYS) }
+}
+
+fn dpi_px(a: &App, v: i32) -> i32 {
+    unsafe { v * GetDpiForWindow(a.hwnd) as i32 / 96 }
+}
+
+/// Side of the corner grip triangle in pixels (never more than half the image).
+fn grip(a: &App) -> i32 {
+    dpi_px(a, 22).min(a.w.min(a.h) / 2)
+}
+
+/// Thickness of the right/bottom edge handles.
+fn edge(a: &App) -> i32 {
+    dpi_px(a, 8).max(6).min(a.w.min(a.h) / 4)
+}
+
+fn zone_at(a: &App, x: i32, y: i32) -> Zone {
+    if x < 0 || y < 0 || x >= a.w || y >= a.h {
+        Zone::None
+    } else if (a.w - 1 - x) + (a.h - 1 - y) < grip(a) {
+        Zone::Corner
+    } else if x >= a.w - edge(a) {
+        Zone::Right
+    } else if y >= a.h - edge(a) {
+        Zone::Bottom
+    } else {
+        Zone::None
+    }
 }
 
 fn render(a: &App) {
@@ -243,18 +332,61 @@ fn render(a: &App) {
             let old = SelectObject(mem_dc, bmp);
             let dst = slice::from_raw_parts_mut(bits as *mut u32, w * h);
             let f = &a.frames[a.cur];
+            // display (u,v) in 0..1 -> source (u,v), undoing flips and rotation
+            let tf = |mut u: f32, mut v: f32| {
+                if a.flip_h { u = 1.0 - u }
+                if a.flip_v { v = 1.0 - v }
+                match a.rot {
+                    0 => (u, v),
+                    1 => (v, 1.0 - u),
+                    2 => (1.0 - u, 1.0 - v),
+                    _ => (1.0 - v, u),
+                }
+            };
+            let (gwf, ghf) = (a.gw as f32, a.gh as f32);
+            let (nw, nh) = natural_size(a);
+            // shrinking: average the covered source area (bilinear alone gives jagged edges)
+            let shrink = (w as f64 / nw).min(h as f64 / nh) < 1.0;
             for y in 0..h {
                 for x in 0..w {
-                    let (mut u, mut v) = ((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
-                    if a.flip_h { u = 1.0 - u }
-                    if a.flip_v { v = 1.0 - v }
-                    let (su, sv) = match a.rot {
-                        0 => (u, v),
-                        1 => (v, 1.0 - u),
-                        2 => (1.0 - u, 1.0 - v),
-                        _ => (1.0 - v, u),
+                    dst[y * w + x] = if shrink {
+                        let (u0, v0) = tf(x as f32 / w as f32, y as f32 / h as f32);
+                        let (u1, v1) = tf((x + 1) as f32 / w as f32, (y + 1) as f32 / h as f32);
+                        box_avg(f, a.gw, a.gh, u0.min(u1) * gwf, v0.min(v1) * ghf, u0.max(u1) * gwf, v0.max(v1) * ghf)
+                    } else {
+                        let (su, sv) = tf((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+                        sample(f, a.gw, a.gh, su * gwf - 0.5, sv * ghf - 0.5)
                     };
-                    dst[y * w + x] = sample(f, a.gw, a.gh, su * a.gw as f32 - 0.5, sv * a.gh as f32 - 0.5);
+                }
+            }
+            // Fully transparent pixels let the mouse fall through the window, so a PNG with a
+            // transparent background could not be grabbed there. Alpha 1 is invisible but hit-testable.
+            for p in dst.iter_mut() {
+                if *p >> 24 == 0 {
+                    *p = 0x0100_0000;
+                }
+            }
+            // resize handles, shown while hovering: edge bars + a striped corner triangle,
+            // the one under the cursor is highlighted
+            if a.hover && !a.locked {
+                let (g, t) = (grip(a) as usize, (edge(a) / 2).max(3) as usize);
+                let color = |z: Zone, normal: u32| if a.hot == z { 0xB000_5394 } else { normal };
+                for y in 0..h - g {
+                    for x in w - t..w {
+                        dst[y * w + x] = color(Zone::Right, 0x6000_0000);
+                    }
+                }
+                for y in h - t..h {
+                    for x in 0..w - g {
+                        dst[y * w + x] = color(Zone::Bottom, 0x6000_0000);
+                    }
+                }
+                for dy in 0..g {
+                    for dx in 0..g - dy {
+                        let d = dx + dy;
+                        dst[(h - 1 - dy) * w + (w - 1 - dx)] =
+                            if d < g - 3 && matches!(d % 6, 2 | 3) { 0xC0C0_C0C0 } else { color(Zone::Corner, 0x7000_0000) };
+                    }
                 }
             }
             let size = SIZE { cx: w as i32, cy: h as i32 };
@@ -314,51 +446,121 @@ fn resize(a: &mut App, w: i32, h: i32) {
     schedule_save(a);
 }
 
-fn center(a: &App) {
+/// Centers the window on the screen, shifted by `offset` px so extra windows cascade.
+fn center(a: &App, offset: i32) {
     unsafe {
-        let x = (GetSystemMetrics(SM_CXSCREEN) - a.w) / 2;
-        let y = (GetSystemMetrics(SM_CYSCREEN) - a.h) / 2;
+        let x = (GetSystemMetrics(SM_CXSCREEN) - a.w) / 2 + offset;
+        let y = (GetSystemMetrics(SM_CYSCREEN) - a.h) / 2 + offset;
         SetWindowPos(a.hwnd, null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
 }
 
-fn load(a: &mut App, path: &str) -> bool {
-    match decode(path, usize::MAX) {
-        Ok((gw, gh, frames, delays)) => {
-            a.gw = gw;
-            a.gh = gh;
-            a.frames = frames;
-            a.delays = delays;
-            a.cur = 0;
-            a.rot = 0;
-            a.flip_h = false;
-            a.flip_v = false;
-            (a.w, a.h) = fit_size(a);
-            render(a);
-            center(a);
-            schedule_frame(a);
-            true
-        }
-        Err(e) => unsafe {
-            MessageBoxW(null_mut(), wide(&format!("Failed to load GIF: {e}")).as_ptr(), wide("Error").as_ptr(), MB_OK | MB_ICONERROR);
-            false
-        },
+fn show_error(e: &str) {
+    unsafe {
+        MessageBoxW(null_mut(), wide(&format!("Failed to load image: {e}")).as_ptr(), wide("Error").as_ptr(), MB_OK | MB_ICONERROR);
     }
 }
 
-/// Shows `path` in the overlay, records it in the history and hides the dashboard.
+/// Puts a decoded image into the window and fits it to the screen.
+fn apply(a: &mut App, path: &str, (gw, gh, frames, delays): Decoded) {
+    a.gw = gw;
+    a.gh = gh;
+    a.frames = frames;
+    a.delays = delays;
+    a.cur = 0;
+    a.rot = 0;
+    a.flip_h = false;
+    a.flip_v = false;
+    a.paused = false;
+    (a.w, a.h) = fit_size(a);
+    render(a);
+    schedule_frame(a);
+    let name = Path::new(path).file_name().map_or(path.to_string(), |n| n.to_string_lossy().into_owned());
+    unsafe { SetWindowTextW(a.hwnd, wide(&name).as_ptr()) }; // tells windows apart in the taskbar
+}
+
+/// Replaces the image shown in this window (the window stays where it is).
+fn change_image(a: &mut App, path: &str) -> bool {
+    let path = abs_path(path);
+    match decode(&path, usize::MAX) {
+        Ok(d) => {
+            apply(a, &path, d);
+            history_push(&path);
+            true
+        }
+        Err(e) => {
+            show_error(&e);
+            false
+        }
+    }
+}
+
+/// (opacity %, locked) remembered from the last session, used for every new window.
+fn saved_defaults() -> (u32, bool) {
+    let saved = fs::read_to_string(exe_file("settings.json")).unwrap_or_default();
+    let opacity = json_val(&saved, "Opacity")
+        .and_then(|v| v.parse::<f64>().ok())
+        .map_or(100, |o| (o * 100.0).round().clamp(10.0, 100.0) as u32);
+    (opacity, json_val(&saved, "IsLocked").is_some_and(|v| v == "true"))
+}
+
+/// Opens `path` in a new overlay window.
+fn create_overlay(path: &str) -> bool {
+    let d = match decode(path, usize::MAX) {
+        Ok(d) => d,
+        Err(e) => {
+            show_error(&e);
+            return false;
+        }
+    };
+    let (opacity, locked) = saved_defaults();
+    unsafe {
+        let a = Box::into_raw(Box::new(App {
+            hwnd: null_mut(),
+            frames: Vec::new(),
+            delays: Vec::new(),
+            gw: 0,
+            gh: 0,
+            cur: 0,
+            paused: false,
+            rot: 0,
+            flip_h: false,
+            flip_v: false,
+            w: 300,
+            h: 300,
+            opacity,
+            locked,
+            hover: false,
+            hot: Zone::None,
+            drag: None,
+        }));
+        let hwnd = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_APPWINDOW,
+            wide("GifOverlayWnd").as_ptr(), wide("GIF Overlay").as_ptr(), WS_POPUP,
+            0, 0, 300, 300,
+            null_mut(), null_mut(), GetModuleHandleW(null()), null(),
+        );
+        (*a).hwnd = hwnd;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, a as isize);
+        let offset = overlays().len() as i32 % 8 * 32;
+        overlays().push(a);
+        DragAcceptFiles(hwnd, 1);
+        apply(&mut *a, path, d);
+        center(&*a, offset);
+        ShowWindow(hwnd, SW_SHOW);
+        SetForegroundWindow(hwnd);
+    }
+    true
+}
+
+/// Opens `path` in a new window, records it in the history and hides the dashboard.
 fn open_gif(path: &str) -> bool {
     let path = abs_path(path);
-    if !load(app(), &path) {
+    if !create_overlay(&path) {
         return false;
     }
     history_push(&path);
-    unsafe {
-        let a = app();
-        ShowWindow(a.hwnd, SW_SHOW);
-        SetForegroundWindow(a.hwnd);
-        ShowWindow(dash().hwnd, SW_HIDE);
-    }
+    unsafe { ShowWindow(dash().hwnd, SW_HIDE) };
     true
 }
 
@@ -377,7 +579,7 @@ fn command(a: &mut App, id: usize) {
         }
         ID_OPEN => {
             if let Some(p) = open_dialog(a.hwnd) {
-                open_gif(&p);
+                change_image(a, &p);
             }
         }
         ID_HISTORY => show_dash(),
@@ -405,13 +607,10 @@ fn command(a: &mut App, id: usize) {
             schedule_frame(a);
         }
         // "Close" goes back to the dashboard; closing the dashboard window quits the app.
+        // WM_DESTROY frees `a`, so nothing may touch it after DestroyWindow.
         ID_EXIT => unsafe {
             save_settings(a);
-            KillTimer(a.hwnd, T_FRAME);
-            ShowWindow(a.hwnd, SW_HIDE);
-            a.frames = Vec::new();
-            a.paused = false;
-            show_dash();
+            DestroyWindow(a.hwnd);
         },
         i if (ID_SCALE..ID_SCALE + SCALES.len()).contains(&i) => {
             let (nw, nh) = natural_size(a);
@@ -427,9 +626,17 @@ fn command(a: &mut App, id: usize) {
     }
 }
 
-fn context_menu(a: &mut App) {
+unsafe fn app_of(hwnd: HWND) -> Option<&'static mut App> {
+    (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App).as_mut()
+}
+
+fn context_menu(hwnd: HWND) {
     unsafe {
-        let add = |m: HMENU, flags: u32, id: usize, text: &str| {
+        // Copy what the menu needs: it runs a nested message loop in which timers keep
+        // firing (and the window could even be closed), so no reference may be held across it.
+        let Some(a) = app_of(hwnd) else { return };
+        let (opacity, locked, flip_h, flip_v, paused) = (a.opacity, a.locked, a.flip_h, a.flip_v, a.paused);
+        let add =|m: HMENU, flags: u32, id: usize, text: &str| {
             AppendMenuW(m, flags, id, wide(text).as_ptr());
         };
         let check = |on: bool| if on { MF_CHECKED } else { 0 };
@@ -439,70 +646,148 @@ fn context_menu(a: &mut App) {
             add(scale, MF_STRING, ID_SCALE + i, &format!("{s}%"));
         }
         for (i, o) in OPACITIES.iter().enumerate() {
-            add(opac, MF_STRING | check(a.opacity == *o), ID_OPACITY + i, &format!("{o}%"));
+            add(opac, MF_STRING | check(opacity == *o), ID_OPACITY + i, &format!("{o}%"));
         }
         add(xform, MF_STRING, ID_ROT_L, "Rotate Left");
         add(xform, MF_STRING, ID_ROT_R, "Rotate Right");
-        add(xform, MF_STRING | check(a.flip_h), ID_FLIP_H, "Flip Horizontal");
-        add(xform, MF_STRING | check(a.flip_v), ID_FLIP_V, "Flip Vertical");
+        add(xform, MF_STRING | check(flip_h), ID_FLIP_H, "Flip Horizontal");
+        add(xform, MF_STRING | check(flip_v), ID_FLIP_V, "Flip Vertical");
         add(settings, MF_POPUP, scale as usize, "Scale");
         add(settings, MF_POPUP, opac as usize, "Opacity");
         add(settings, MF_POPUP, xform as usize, "Transform");
         add(settings, MF_SEPARATOR, 0, "");
         add(settings, MF_STRING, ID_RESET, "Reset to Default");
 
-        add(menu, MF_STRING | check(a.locked), ID_LOCK, "Lock Window");
+        add(menu, MF_STRING | check(locked), ID_LOCK, "Lock Window");
         add(menu, MF_SEPARATOR, 0, "");
-        add(menu, MF_STRING, ID_HISTORY, "History...");
-        add(menu, MF_STRING, ID_OPEN, "Change GIF...");
+        add(menu, MF_STRING, ID_HISTORY, "Open another image...");
+        add(menu, MF_STRING, ID_OPEN, "Replace this image...");
         add(menu, MF_SEPARATOR, 0, "");
         add(menu, MF_POPUP, settings as usize, "Settings");
-        add(menu, MF_STRING | check(a.paused), ID_PAUSE, "Pause / Play");
+        add(menu, MF_STRING | check(paused), ID_PAUSE, "Pause / Play");
         add(menu, MF_SEPARATOR, 0, "");
-        add(menu, MF_STRING, ID_EXIT, "Close (back to history)");
+        add(menu, MF_STRING, ID_EXIT, "Close");
 
         let mut pt = POINT { x: 0, y: 0 };
         GetCursorPos(&mut pt);
-        SetForegroundWindow(a.hwnd);
-        let hwnd = a.hwnd;
-        // The menu runs a nested message loop; timers keep firing, so don't hold `a` across it.
+        SetForegroundWindow(hwnd);
         let id = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, null());
         DestroyMenu(menu); // also destroys the submenus
         if id > 0 {
-            command(app(), id as usize);
+            if let Some(a) = app_of(hwnd) {
+                command(a, id as usize);
+            }
         }
     }
 }
 
+unsafe fn track_leave(hwnd: HWND) {
+    let mut t = TRACKMOUSEEVENT { cbSize: mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+    TrackMouseEvent(&mut t);
+}
+
 unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    // messages sent while the window is being created / after it is destroyed have no App yet
+    let Some(a) = app_of(hwnd) else { return DefWindowProcW(hwnd, msg, wp, lp) };
     match msg {
         WM_LBUTTONDOWN => {
-            if !app().locked {
-                ReleaseCapture();
-                SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as usize, 0);
+            if !a.locked {
+                let zone = zone_at(a, lp as i16 as i32, (lp >> 16) as i16 as i32);
+                if zone != Zone::None {
+                    let mut pt = POINT { x: 0, y: 0 };
+                    GetCursorPos(&mut pt);
+                    a.drag = Some((zone, pt.x, pt.y, a.w, a.h));
+                    SetCapture(hwnd);
+                } else {
+                    ReleaseCapture();
+                    SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as usize, 0);
+                }
             }
             0
         }
+        WM_MOUSEMOVE => {
+            if let Some((zone, mx, my, w0, h0)) = a.drag {
+                let mut pt = POINT { x: 0, y: 0 };
+                GetCursorPos(&mut pt);
+                let (nw, nh) = match zone {
+                    Zone::Right => (w0 + pt.x - mx, h0),
+                    Zone::Bottom => (w0, h0 + pt.y - my),
+                    _ => {
+                        // corner keeps the aspect ratio: follow whichever axis moved further
+                        let k = ((w0 + pt.x - mx) as f64 / w0 as f64).max((h0 + pt.y - my) as f64 / h0 as f64);
+                        ((w0 as f64 * k).round() as i32, (h0 as f64 * k).round() as i32)
+                    }
+                };
+                resize(a, nw, nh);
+            } else if !a.frames.is_empty() {
+                let zone = zone_at(a, lp as i16 as i32, (lp >> 16) as i16 as i32);
+                if !a.hover || zone != a.hot {
+                    if !a.hover {
+                        track_leave(hwnd);
+                    }
+                    a.hover = true;
+                    a.hot = zone;
+                    render(a);
+                }
+            }
+            0
+        }
+        WM_MOUSELEAVE => {
+            a.hover = false;
+            a.hot = Zone::None;
+            if a.drag.is_none() && !a.frames.is_empty() {
+                render(a);
+            }
+            0
+        }
+        WM_LBUTTONUP => {
+            if a.drag.take().is_some() {
+                ReleaseCapture();
+                track_leave(hwnd); // the cursor may have ended up outside the window
+            }
+            0
+        }
+        WM_CAPTURECHANGED => {
+            a.drag = None;
+            0
+        }
+        WM_SETCURSOR => {
+            let mut pt = POINT { x: 0, y: 0 };
+            GetCursorPos(&mut pt);
+            ScreenToClient(hwnd, &mut pt);
+            let zone = a.drag.map_or_else(|| zone_at(a, pt.x, pt.y), |d| d.0);
+            let cursor = match zone {
+                Zone::Corner => IDC_SIZENWSE,
+                Zone::Right => IDC_SIZEWE,
+                Zone::Bottom => IDC_SIZENS,
+                Zone::None => null(),
+            };
+            if !a.locked && !cursor.is_null() {
+                SetCursor(LoadCursorW(null_mut(), cursor));
+                1
+            } else {
+                DefWindowProcW(hwnd, msg, wp, lp)
+            }
+        }
         WM_RBUTTONUP => {
-            context_menu(app());
+            context_menu(hwnd);
             0
         }
         WM_DROPFILES => {
+            // dropping on an overlay swaps its image; the dashboard is where new windows are opened
             if let Some(p) = dropped_file(wp) {
-                open_gif(&p);
+                change_image(a, &p);
             }
             0
         }
         WM_MOUSEWHEEL => {
             if wp & 0x8 != 0 { // MK_CONTROL
-                let a = app();
                 let k = if (wp >> 16) as i16 > 0 { 1.1 } else { 0.9 };
                 resize(a, (a.w as f64 * k) as i32, (a.h as f64 * k) as i32);
             }
             0
         }
         WM_TIMER => {
-            let a = app();
             match wp {
                 T_FRAME if !a.frames.is_empty() => {
                     a.cur = (a.cur + 1) % a.frames.len();
@@ -518,7 +803,14 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             0
         }
         WM_DESTROY => {
-            PostQuitMessage(0);
+            let p = a as *mut App;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            overlays().retain(|&q| q != p);
+            drop(Box::from_raw(p));
+            // closing the last window goes back to the dashboard (unless the app is quitting)
+            if overlays().is_empty() {
+                show_dash();
+            }
             0
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
@@ -803,8 +1095,8 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             0
         }
         WM_CLOSE => {
-            // With the overlay on screen the dashboard just hides; otherwise closing it quits.
-            if IsWindowVisible(app().hwnd) != 0 {
+            // With overlays on screen the dashboard just hides; otherwise closing it quits.
+            if !overlays().is_empty() {
                 ShowWindow(hwnd, SW_HIDE);
             } else {
                 DestroyWindow(hwnd);
@@ -835,14 +1127,14 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     let child = |class: &str, text: &str, style: u32, id: usize| {
         CreateWindowExW(0, wide(class).as_ptr(), wide(text).as_ptr(), WS_CHILD | style, 0, 0, 0, 0, hwnd, id as HMENU, hinst, null())
     };
-    let add = child("BUTTON", "Add GIF\u{2026}", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_ADD);
+    let add = child("BUTTON", "Add image\u{2026}", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_ADD);
     let default_btn = child("BUTTON", "Set as default viewer\u{2026}", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_DEFAULT);
     let list = child(
         "SysListView32", "",
         WS_VISIBLE | WS_TABSTOP | (LVS_ICON | LVS_AUTOARRANGE | LVS_SINGLESEL | LVS_SHOWSELALWAYS) as u32,
         IDC_LIST,
     );
-    let empty = child("STATIC", "No history yet\r\nClick \"Add GIF\u{2026}\" or drop a GIF file here.", 0x1 /* SS_CENTER */, 0);
+    let empty = child("STATIC", "No history yet\r\nClick \"Add image\u{2026}\" or drop an image here.", 0x1 /* SS_CENTER */, 0);
 
     // Explorer-style selection and system UI font, like any native app
     SetWindowTheme(list, wide("Explorer").as_ptr(), null());
@@ -883,29 +1175,9 @@ unsafe fn register(name: &[u16], proc: WNDPROC, hinst: HINSTANCE) {
 }
 
 fn main() {
-    let saved = fs::read_to_string(exe_file("settings.json")).unwrap_or_default();
-    let opacity = json_val(&saved, "Opacity")
-        .and_then(|v| v.parse::<f64>().ok())
-        .map_or(100, |o| (o * 100.0).round().clamp(10.0, 100.0) as u32);
-    let locked = json_val(&saved, "IsLocked").is_some_and(|v| v == "true");
-
     unsafe {
-        APP = Some(App {
-            hwnd: null_mut(),
-            frames: Vec::new(),
-            delays: Vec::new(),
-            gw: 0,
-            gh: 0,
-            cur: 0,
-            paused: false,
-            rot: 0,
-            flip_h: false,
-            flip_v: false,
-            w: 300,
-            h: 300,
-            opacity,
-            locked,
-        });
+        // WIC (static image decoding) needs COM on this thread
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         DASH = Some(Dash {
             hwnd: null_mut(),
             list: null_mut(),
@@ -922,18 +1194,9 @@ fn main() {
         let (oc, dc) = (wide("GifOverlayWnd"), wide("GifOverlayDash"));
         register(&oc, Some(overlay_proc), hinst);
         register(&dc, Some(dash_proc), hinst);
-        let title = wide("GIF Overlay");
-        let overlay = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_APPWINDOW,
-            oc.as_ptr(), title.as_ptr(), WS_POPUP,
-            0, 0, 300, 300,
-            null_mut(), null_mut(), hinst, null(),
-        );
-        app().hwnd = overlay;
         create_dash(hinst, &dc);
-        DragAcceptFiles(overlay, 1);
 
-        // "Open With" / command line goes straight to the overlay; a bare launch shows the history.
+        // "Open With" / command line goes straight to an overlay; a bare launch shows the history.
         let opened = std::env::args()
             .nth(1)
             .filter(|p| fs::metadata(p).is_ok())
