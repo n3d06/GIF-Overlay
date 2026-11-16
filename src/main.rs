@@ -34,6 +34,7 @@ const ID_RESET: usize = 7;
 const ID_PAUSE: usize = 8;
 const ID_EXIT: usize = 9;
 const ID_HISTORY: usize = 10;
+const ID_QUIT: usize = 11;
 const ID_SCALE: usize = 100; // + index into SCALES
 const ID_OPACITY: usize = 200; // + index into OPACITIES
 const SCALES: [u32; 7] = [25, 50, 75, 100, 150, 200, 300];
@@ -139,8 +140,21 @@ fn decode_wic(path: &str) -> Result<Decoded, String> {
             .CreateDecoderFromFilename(&HSTRING::from(path), None, GENERIC_READ, WICDecodeMetadataCacheOnDemand)
             .map_err(e)?;
         let frame = decoder.GetFrame(0).map_err(e)?;
+        // EXIF orientation (phone photos): WIC applies flip first, then rotate
+        let opts = exif_orientation(&frame).map_or(0, |o| match o {
+            2 => 8,
+            3 => 2,
+            4 => 16,
+            5 => 3 | 8,
+            6 => 1,
+            7 => 1 | 8,
+            8 => 3,
+            _ => 0,
+        });
+        let rotator = factory.CreateBitmapFlipRotator().map_err(e)?;
+        rotator.Initialize(&frame, WICBitmapTransformOptions(opts)).map_err(e)?;
         let conv = factory.CreateFormatConverter().map_err(e)?;
-        conv.Initialize(&frame, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom)
+        conv.Initialize(&rotator, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom)
             .map_err(e)?;
         let (mut w, mut h) = (0u32, 0u32);
         conv.GetSize(&mut w, &mut h).map_err(e)?;
@@ -152,6 +166,13 @@ fn decode_wic(path: &str) -> Result<Decoded, String> {
             .map_err(e)?;
         Ok((w as usize, h as usize, vec![px], vec![100]))
     }
+}
+
+fn exif_orientation(frame: &windows::Win32::Graphics::Imaging::IWICBitmapFrameDecode) -> Option<u16> {
+    use windows::core::w;
+    let mut pv = windows::Win32::System::Com::StructuredStorage::PROPVARIANT::default();
+    unsafe { frame.GetMetadataQueryReader().ok()?.GetMetadataByName(w!("/app1/ifd/{ushort=274}"), &mut pv).ok()? };
+    u16::try_from(&pv).ok()
 }
 
 /// Decodes up to `max` frames into full-canvas premultiplied BGRA.
@@ -167,7 +188,13 @@ fn decode_gif(path: &str, max: usize) -> Result<Decoded, String> {
     let mut canvas = vec![0u32; gw * gh];
     let (mut frames, mut delays) = (Vec::new(), Vec::new());
     while frames.len() < max {
-        let Some(f) = dec.read_next_frame().map_err(|e| e.to_string())? else { break };
+        // a corrupt frame mid-file keeps the frames decoded so far instead of losing the animation
+        let f = match dec.read_next_frame() {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(e) if frames.is_empty() => return Err(e.to_string()),
+            Err(_) => break,
+        };
         let saved = (f.dispose == gif::DisposalMethod::Previous).then(|| canvas.clone());
         let (l, t, w, h) = (f.left as usize, f.top as usize, f.width as usize, f.height as usize);
         for y in 0..h {
@@ -281,6 +308,7 @@ enum Zone {
     Corner,
     Right,
     Bottom,
+    Close, // the X button in the top-right corner
 }
 
 // One `App` per overlay window, owned through the window's GWLP_USERDATA pointer.
@@ -308,6 +336,8 @@ fn edge(a: &App) -> i32 {
 fn zone_at(a: &App, x: i32, y: i32) -> Zone {
     if x < 0 || y < 0 || x >= a.w || y >= a.h {
         Zone::None
+    } else if x >= a.w - grip(a) && y < grip(a) {
+        Zone::Close
     } else if (a.w - 1 - x) + (a.h - 1 - y) < grip(a) {
         Zone::Corner
     } else if x >= a.w - edge(a) {
@@ -394,6 +424,22 @@ fn render(a: &App) {
                     }
                 }
             }
+            // close button: dark square with a white X, red under the cursor (also when locked)
+            if a.hover {
+                let g = grip(a) as usize;
+                let bg = if a.hot == Zone::Close { 0xE0C4_2B1B } else { 0x7000_0000 };
+                for y in 0..g {
+                    for x in w - g..w {
+                        dst[y * w + x] = bg;
+                    }
+                }
+                for i in g / 4..g - g / 4 {
+                    for (y, x) in [(i, w - g + i), (i, w - 2 - i)] {
+                        dst[y * w + x] = 0xFFFF_FFFF;
+                        dst[y * w + x + 1] = 0xFFFF_FFFF; // 2px thick
+                    }
+                }
+            }
             let size = SIZE { cx: w as i32, cy: h as i32 };
             let src = POINT { x: 0, y: 0 };
             let bf = BLENDFUNCTION {
@@ -442,7 +488,9 @@ fn fit_size(a: &App) -> (i32, i32) {
 }
 
 fn resize(a: &mut App, w: i32, h: i32) {
-    if w < 50 || h < 50 {
+    // upper bound: a huge window makes the DIB allocation fail and the render crawl
+    let (sw, sh) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+    if w < 50 || h < 50 || w > sw * 3 || h > sh * 3 {
         return;
     }
     a.w = w;
@@ -598,6 +646,10 @@ fn command(a: &mut App, id: usize) {
             }
         }
         ID_HISTORY => show_dash(),
+        ID_QUIT => unsafe {
+            save_settings(a);
+            PostQuitMessage(0); // process exit tears down every overlay
+        },
         ID_ROT_L => rotate(a, 3),
         ID_ROT_R => rotate(a, 1),
         ID_FLIP_H => {
@@ -621,7 +673,7 @@ fn command(a: &mut App, id: usize) {
             a.paused = !a.paused;
             schedule_frame(a);
         }
-        // "Close" goes back to the dashboard; closing the dashboard window quits the app.
+        // Closes this image only (the app quits when the last one goes and no dashboard is showing).
         // WM_DESTROY frees `a`, so nothing may touch it after DestroyWindow.
         ID_EXIT => unsafe {
             save_settings(a);
@@ -675,13 +727,13 @@ fn context_menu(hwnd: HWND) {
 
         add(menu, MF_STRING | check(locked), ID_LOCK, "Lock Window");
         add(menu, MF_SEPARATOR, 0, "");
-        add(menu, MF_STRING, ID_HISTORY, "Open another image...");
+        add(menu, MF_STRING, ID_HISTORY, "Dashboard");
         add(menu, MF_STRING, ID_OPEN, "Replace this image...");
         add(menu, MF_SEPARATOR, 0, "");
         add(menu, MF_POPUP, settings as usize, "Settings");
         add(menu, MF_STRING | check(paused), ID_PAUSE, "Pause / Play");
         add(menu, MF_SEPARATOR, 0, "");
-        add(menu, MF_STRING, ID_EXIT, "Close");
+        add(menu, MF_STRING, ID_QUIT, "Exit app");
 
         let mut pt = POINT { x: 0, y: 0 };
         GetCursorPos(&mut pt);
@@ -706,8 +758,10 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
     let Some(a) = app_of(hwnd) else { return DefWindowProcW(hwnd, msg, wp, lp) };
     match msg {
         WM_LBUTTONDOWN => {
-            if !a.locked {
-                let zone = zone_at(a, lp as i16 as i32, (lp >> 16) as i16 as i32);
+            let zone = zone_at(a, lp as i16 as i32, (lp >> 16) as i16 as i32);
+            if zone == Zone::Close {
+                command(a, ID_EXIT); // destroys the window: `a` is gone after this
+            } else if !a.locked {
                 if zone != Zone::None {
                     let mut pt = POINT { x: 0, y: 0 };
                     GetCursorPos(&mut pt);
@@ -775,9 +829,10 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 Zone::Corner => IDC_SIZENWSE,
                 Zone::Right => IDC_SIZEWE,
                 Zone::Bottom => IDC_SIZENS,
+                Zone::Close => IDC_HAND,
                 Zone::None => null(),
             };
-            if !a.locked && !cursor.is_null() {
+            if (!a.locked || zone == Zone::Close) && !cursor.is_null() {
                 SetCursor(LoadCursorW(null_mut(), cursor));
                 1
             } else {
@@ -822,10 +877,11 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             overlays().retain(|&q| q != p);
             drop(Box::from_raw(p));
-            // closing the last window goes back to the dashboard (unless the app is quitting)
-            if overlays().is_empty() {
-                show_dash();
-            } else if IsWindowVisible(dash().hwnd) != 0 {
+            // closing the last image quits, unless the dashboard was opened on purpose and is still showing
+            let dash_visible = IsWindowVisible(dash().hwnd) != 0;
+            if overlays().is_empty() && !dash_visible {
+                PostQuitMessage(0);
+            } else if dash_visible {
                 refresh_dash(); // the "open" marks changed
             }
             0
