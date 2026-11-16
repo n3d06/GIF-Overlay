@@ -40,6 +40,7 @@ const ID_OPACITY: usize = 200; // + index into OPACITIES
 const SCALES: [u32; 7] = [25, 50, 75, 100, 150, 200, 300];
 const OPACITIES: [u32; 10] = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
 const HISTORY_MAX: usize = 30;
+const GIF_BUDGET: usize = 512 << 20; // bytes of decoded GIF frames kept per image
 
 // ---------- shared helpers ----------
 
@@ -51,6 +52,14 @@ fn exe_file(name: &str) -> PathBuf {
     let mut p = std::env::current_exe().unwrap_or_default();
     p.set_file_name(name);
     p
+}
+
+/// Writes next to the exe via a temp file + rename, so a crash mid-write cannot leave a half file.
+fn write_atomic(name: &str, data: &[u8]) {
+    let tmp = exe_file(&format!("{name}.tmp"));
+    if fs::write(&tmp, data).is_ok() && fs::rename(&tmp, exe_file(name)).is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
 }
 
 fn abs_path(p: &str) -> String {
@@ -70,7 +79,7 @@ fn write_settings(opacity: u32, locked: bool) {
         "{{\n  \"Opacity\": {},\n  \"IsLocked\": {},\n  \"DashSort\": {}\n}}",
         opacity as f64 / 100.0, locked, dash().sort
     );
-    let _ = fs::write(exe_file("settings.json"), json);
+    write_atomic("settings.json", json.as_bytes());
 }
 
 fn save_settings(a: &App) {
@@ -90,7 +99,7 @@ fn history_load() -> Vec<String> {
 }
 
 fn history_save(h: &[String]) {
-    let _ = fs::write(exe_file("history.txt"), h.join("\n"));
+    write_atomic("history.txt", h.join("\n").as_bytes());
 }
 
 fn history_push(path: &str) {
@@ -185,6 +194,12 @@ fn decode_gif(path: &str, max: usize) -> Result<Decoded, String> {
     if gw == 0 || gh == 0 {
         return Err("empty image".into());
     }
+    // memory budget: every frame is a full canvas, and running out of RAM aborts the app
+    let frame_bytes = gw * gh * 4;
+    if frame_bytes > GIF_BUDGET {
+        return Err("image too large".into());
+    }
+    let max = max.min(GIF_BUDGET / frame_bytes); // longer GIFs are cut to the frames that fit
     let mut canvas = vec![0u32; gw * gh];
     let (mut frames, mut delays) = (Vec::new(), Vec::new());
     while frames.len() < max {
@@ -336,7 +351,7 @@ fn edge(a: &App) -> i32 {
 fn zone_at(a: &App, x: i32, y: i32) -> Zone {
     if x < 0 || y < 0 || x >= a.w || y >= a.h {
         Zone::None
-    } else if x >= a.w - grip(a) && y < grip(a) {
+    } else if !a.locked && x >= a.w - grip(a) && y < grip(a) {
         Zone::Close
     } else if (a.w - 1 - x) + (a.h - 1 - y) < grip(a) {
         Zone::Corner
@@ -424,8 +439,8 @@ fn render(a: &App) {
                     }
                 }
             }
-            // close button: dark square with a white X, red under the cursor (also when locked)
-            if a.hover {
+            // close button: dark square with a white X, red under the cursor (hidden when locked)
+            if a.hover && !a.locked {
                 let g = grip(a) as usize;
                 let bg = if a.hot == Zone::Close { 0xE0C4_2B1B } else { 0x7000_0000 };
                 for y in 0..g {
@@ -638,6 +653,7 @@ fn command(a: &mut App, id: usize) {
     match id {
         ID_LOCK => {
             a.locked = !a.locked;
+            render(a); // show / hide the handles and the X right away
             schedule_save(a);
         }
         ID_OPEN => {
@@ -759,9 +775,7 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
     match msg {
         WM_LBUTTONDOWN => {
             let zone = zone_at(a, lp as i16 as i32, (lp >> 16) as i16 as i32);
-            if zone == Zone::Close {
-                command(a, ID_EXIT); // destroys the window: `a` is gone after this
-            } else if !a.locked {
+            if !a.locked {
                 if zone != Zone::None {
                     let mut pt = POINT { x: 0, y: 0 };
                     GetCursorPos(&mut pt);
@@ -775,7 +789,14 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             0
         }
         WM_MOUSEMOVE => {
-            if let Some((zone, mx, my, w0, h0)) = a.drag {
+            if let Some((Zone::Close, ..)) = a.drag {
+                // pressed on X: it only closes if the button is released still on it
+                let zone = zone_at(a, lp as i16 as i32, (lp >> 16) as i16 as i32);
+                if zone != a.hot {
+                    a.hot = zone;
+                    render(a);
+                }
+            } else if let Some((zone, mx, my, w0, h0)) = a.drag {
                 let mut pt = POINT { x: 0, y: 0 };
                 GetCursorPos(&mut pt);
                 let (nw, nh) = match zone {
@@ -810,8 +831,12 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             0
         }
         WM_LBUTTONUP => {
-            if a.drag.take().is_some() {
+            if let Some((zone, ..)) = a.drag.take() {
                 ReleaseCapture();
+                if zone == Zone::Close && zone_at(a, lp as i16 as i32, (lp >> 16) as i16 as i32) == Zone::Close {
+                    command(a, ID_EXIT); // destroys the window: `a` is gone after this
+                    return 0;
+                }
                 track_leave(hwnd); // the cursor may have ended up outside the window
             }
             0
@@ -832,7 +857,7 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 Zone::Close => IDC_HAND,
                 Zone::None => null(),
             };
-            if (!a.locked || zone == Zone::Close) && !cursor.is_null() {
+            if !a.locked && !cursor.is_null() {
                 SetCursor(LoadCursorW(null_mut(), cursor));
                 1
             } else {
@@ -853,7 +878,7 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         WM_MOUSEWHEEL => {
             if wp & 0x8 != 0 { // MK_CONTROL
                 let k = if (wp >> 16) as i16 > 0 { 1.1 } else { 0.9 };
-                resize(a, (a.w as f64 * k) as i32, (a.h as f64 * k) as i32);
+                resize(a, (a.w as f64 * k).round() as i32, (a.h as f64 * k).round() as i32);
             }
             0
         }
@@ -1276,7 +1301,7 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     let sort_box = child("COMBOBOX", "", WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | 0x3 /* CBS_DROPDOWNLIST */, IDC_SORT);
     let list = child(
         "SysListView32", "",
-        WS_VISIBLE | WS_TABSTOP | (LVS_ICON | LVS_AUTOARRANGE | LVS_SINGLESEL | LVS_SHOWSELALWAYS) as u32,
+        WS_VISIBLE | WS_TABSTOP | LVS_ICON | LVS_AUTOARRANGE | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
         IDC_LIST,
     );
     let empty = child("STATIC", "No history yet\r\nClick \"Add image\u{2026}\" or drop an image here.", 0x1 /* SS_CENTER */, 0);
@@ -1317,7 +1342,7 @@ unsafe fn register(name: &[u16], proc: WNDPROC, hinst: HINSTANCE) {
         cbClsExtra: 0,
         cbWndExtra: 0,
         hInstance: hinst,
-        hIcon: LoadIconW(hinst, 1 as *const u16), // resource id 1 = app icon (build.rs)
+        hIcon: LoadIconW(hinst, std::ptr::without_provenance::<u16>(1)), // resource id 1 = app icon (build.rs)
         hCursor: LoadCursorW(null_mut(), IDC_ARROW),
         hbrBackground: (COLOR_WINDOW + 1) as HBRUSH, // system window color, follows the theme
         lpszMenuName: null(),
