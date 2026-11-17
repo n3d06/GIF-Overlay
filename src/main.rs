@@ -75,16 +75,19 @@ fn json_val(s: &str, key: &str) -> Option<String> {
     Some(rest.split([',', '\n', '\r', '}']).next()?.trim().to_string())
 }
 
-fn write_settings(opacity: u32, locked: bool) {
+fn write_settings(opacity: u32) {
     let json = format!(
-        "{{\n  \"Opacity\": {},\n  \"IsLocked\": {},\n  \"DashSort\": {}\n}}",
-        opacity as f64 / 100.0, locked, dash().sort
+        "{{
+  \"Opacity\": {},
+  \"DashSort\": {}
+}}",
+        opacity as f64 / 100.0, dash().sort
     );
     write_atomic("settings.json", json.as_bytes());
 }
 
 fn save_settings(a: &App) {
-    write_settings(a.opacity, a.locked);
+    write_settings(a.opacity);
 }
 
 // ---------- history (history.txt, one path per line, newest first) ----------
@@ -589,9 +592,16 @@ fn screen_rect(hwnd: HWND) -> RECT {
     }
 }
 
-/// Natural size, scaled down to fit 80% of the screen.
+/// Natural size, scaled down to fit 80% of the screen (and up to a usable minimum for tiny images).
 fn fit_size(a: &App) -> (i32, i32) {
     let (mut w, mut h) = natural_size(a);
+    // tiny images (icons) would open as a window too small to use: enlarge to at least 128 px
+    let min_side = 128.0 * unsafe { GetDpiForWindow(a.hwnd) } as f64 / 96.0;
+    if w.max(h) < min_side {
+        let k = min_side / w.max(h);
+        w *= k;
+        h *= k;
+    }
     let r = screen_rect(a.hwnd);
     let (sw, sh) = ((r.right - r.left) as f64, (r.bottom - r.top) as f64);
     if w > sw * 0.8 || h > sh * 0.8 {
@@ -650,18 +660,18 @@ fn apply(a: &mut App, path: &str, (gw, gh, frames, delays): Decoded) {
     set_title(a.hwnd, path);
 }
 
-/// (opacity %, locked) remembered from the last session, used for every new window.
-fn saved_defaults() -> (u32, bool) {
+/// Opacity (%) remembered from the last session, used for every new window. The lock is not
+/// remembered: a new window always starts unlocked so it can be moved right away.
+fn saved_opacity() -> u32 {
     let saved = fs::read_to_string(exe_file("settings.json")).unwrap_or_default();
-    let opacity = json_val(&saved, "Opacity")
+    json_val(&saved, "Opacity")
         .and_then(|v| v.parse::<f64>().ok())
-        .map_or(100, |o| (o * 100.0).round().clamp(10.0, 100.0) as u32);
-    (opacity, json_val(&saved, "IsLocked").is_some_and(|v| v == "true"))
+        .map_or(100, |o| (o * 100.0).round().clamp(10.0, 100.0) as u32)
 }
 
 /// Opens an already decoded image in a new overlay window.
 fn create_overlay(path: &str, d: Decoded) {
-    let (opacity, locked) = saved_defaults();
+    let opacity = saved_opacity();
     unsafe {
         let a = Box::into_raw(Box::new(App {
             hwnd: null_mut(),
@@ -677,7 +687,7 @@ fn create_overlay(path: &str, d: Decoded) {
             w: 300,
             h: 300,
             opacity,
-            locked,
+            locked: false,
             hover: false,
             hot: Zone::None,
             drag: None,
@@ -880,7 +890,6 @@ fn command(a: &mut App, id: usize) {
             a.locked = !a.locked;
             apply_lock(a);
             render(a); // show / hide the handles and the X right away
-            schedule_save(a);
         }
         ID_OPEN => {
             if let Some(p) = open_dialog(a.hwnd) {
@@ -1472,8 +1481,7 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         WM_COMMAND if wp & 0xFFFF == IDC_SORT && (wp >> 16) & 0xFFFF == 1 => {
             let d = dash();
             d.sort = SendMessageW(d.sort_box, CB_GETCURSEL, 0, 0).max(0) as u8;
-            let (opacity, locked) = saved_defaults();
-            write_settings(opacity, locked); // remember the choice
+            write_settings(saved_opacity()); // remember the choice
             refresh_dash();
             SetFocus(d.list);
             0
