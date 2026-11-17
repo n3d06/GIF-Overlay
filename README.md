@@ -1,13 +1,12 @@
-[![Download GIF-Overlay](https://img.shields.io/sourceforge/dt/gif-overlay.svg)](https://sourceforge.net/projects/gif-overlay/files/latest/download) [![Download GIF-Overlay](https://img.shields.io/sourceforge/dm/gif-overlay.svg)](https://sourceforge.net/projects/gif-overlay/files/latest/download)[![Download GIF-Overlay](https://img.shields.io/sourceforge/dw/gif-overlay.svg)](https://sourceforge.net/projects/gif-overlay/files/latest/download)[![Download GIF-Overlay](https://img.shields.io/sourceforge/dd/gif-overlay.svg)](https://sourceforge.net/projects/gif-overlay/files/latest/download)
+[demo.webm](https://github.com/user-attachments/assets/0198a568-b603-4cd7-9bff-f477e5804dc7)[![Download GIF-Overlay](https://img.shields.io/sourceforge/dt/gif-overlay.svg)](https://sourceforge.net/projects/gif-overlay/files/latest/download) [![Download GIF-Overlay](https://img.shields.io/sourceforge/dm/gif-overlay.svg)](https://sourceforge.net/projects/gif-overlay/files/latest/download)[![Download GIF-Overlay](https://img.shields.io/sourceforge/dw/gif-overlay.svg)](https://sourceforge.net/projects/gif-overlay/files/latest/download)[![Download GIF-Overlay](https://img.shields.io/sourceforge/dd/gif-overlay.svg)](https://sourceforge.net/projects/gif-overlay/files/latest/download)
 # GIF Overlay - Minimalist GIF & Image Viewer
 
 **GIF Overlay** is a lightweight, high-performance GIF and static image (PNG, JPG, BMP, TIFF, WebP) viewer for Windows, built with **Rust** and the native Win32 API. It focuses on minimalism, efficiency, and a premium aesthetic, allowing you to pin images on top of other windows with a unique translucency effect.
 
-![GIF Overlay Demo](src/assets/demo1.gif)
-
 ## 🎬 Demo Video
 
-[▶ Watch the demo video](docs/demo.webm)
+[▶ Watch the demo video](https://github.com/user-attachments/assets/86e83e9f-0311-4c02-abf9-e0740fbb4a06)
+
 
 ## ✨ Key Features
 
