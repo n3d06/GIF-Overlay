@@ -1396,6 +1396,11 @@ fn remove_item(i: usize) {
     refresh_dash();
 }
 
+/// Height of the command strip at the bottom of the dashboard (like the button row of a Windows dialog).
+fn bar_height(d: &Dash) -> i32 {
+    (52.0 * d.scale) as i32
+}
+
 fn layout() {
     let d = dash();
     if d.list.is_null() {
@@ -1407,16 +1412,18 @@ fn layout() {
         unsafe { GetClientRect(d.hwnd, &mut r) };
         (r.right, r.bottom)
     };
-    let bar = s(52.0);
+    let (bar, top) = (bar_height(d), (h - bar_height(d)).max(0));
+    let y = top + (bar - s(32.0)) / 2;
     unsafe {
-        MoveWindow(d.add, s(12.0), s(10.0), s(130.0), s(32.0), 1);
-        MoveWindow(d.default_btn, s(150.0), s(10.0), s(210.0), s(32.0), 1);
-        MoveWindow(d.clear_btn, s(368.0), s(10.0), s(140.0), s(32.0), 1);
-        MoveWindow(d.help_btn, s(516.0), s(10.0), s(120.0), s(32.0), 1);
+        MoveWindow(d.add, s(12.0), y, s(130.0), s(32.0), 1);
+        MoveWindow(d.default_btn, s(150.0), y, s(210.0), s(32.0), 1);
+        MoveWindow(d.clear_btn, s(368.0), y, s(140.0), s(32.0), 1);
+        MoveWindow(d.help_btn, s(516.0), y, s(120.0), s(32.0), 1);
         // a combo box's height includes its drop-down list
-        MoveWindow(d.sort_box, w - s(12.0 + 190.0), s(10.0), s(190.0), s(160.0), 1);
-        MoveWindow(d.list, 0, bar, w, (h - bar).max(0), 1);
-        MoveWindow(d.empty, 0, bar + (h - bar) / 2 - s(24.0), w, s(48.0), 1);
+        MoveWindow(d.sort_box, w - s(12.0 + 190.0), y + s(4.0), s(190.0), s(160.0), 1);
+        MoveWindow(d.list, 0, 0, w, top, 1);
+        MoveWindow(d.empty, 0, top / 2 - s(24.0), w, s(48.0), 1);
+        InvalidateRect(d.hwnd, null(), 1); // the strip moved
     }
 }
 
@@ -1447,6 +1454,17 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         WM_SETFOCUS => {
             SetFocus(dash().list);
             0
+        }
+        // the bottom strip uses the dialog button-face color with a thin top edge, like a native dialog footer
+        WM_ERASEBKGND => {
+            let mut r: RECT = mem::zeroed();
+            GetClientRect(hwnd, &mut r);
+            FillRect(wp as HDC, &r, GetSysColorBrush(COLOR_WINDOW));
+            r.top = r.bottom - bar_height(dash());
+            FillRect(wp as HDC, &r, GetSysColorBrush(COLOR_BTNFACE));
+            r.bottom = r.top + 1;
+            FillRect(wp as HDC, &r, GetSysColorBrush(COLOR_3DLIGHT));
+            1
         }
         WM_GETMINMAXINFO => {
             // keep the toolbar from overlapping itself
