@@ -499,6 +499,11 @@ fn render(a: &App) {
                         dst[y * w + x] = color(Zone::Bottom, 0x6000_0000);
                     }
                 }
+                // left and top edges only complete the frame so the four sides look alike
+                for y in 0..h {
+                    dst[y * w..y * w + t].fill(0x6000_0000);
+                }
+                dst[..t * w].fill(0x6000_0000);
                 for dy in 0..g {
                     for dx in 0..g - dy {
                         let d = dx + dy;
@@ -1213,6 +1218,8 @@ fn open_default_apps() {
 const IDC_LIST: usize = 1002;
 const IDC_CLEAR: usize = 1004;
 const IDC_HELP: usize = 1006;
+const IDC_BUG: usize = 1007;
+const ISSUES_URL: &str = "https://github.com/n3d06/GIF-Overlay/issues";
 const IDC_SORT: usize = 1005;
 const SORT_RECENT: u8 = 0;
 const SORT_NAME: u8 = 1;
@@ -1232,6 +1239,7 @@ struct Dash {
     default_btn: HWND,
     clear_btn: HWND,
     help_btn: HWND,
+    bug_btn: HWND,
     sort_box: HWND,
     sort: u8, // SORT_RECENT (most recently opened first) or SORT_NAME
     empty: HWND,
@@ -1415,12 +1423,13 @@ fn layout() {
     let (bar, top) = (bar_height(d), (h - bar_height(d)).max(0));
     let y = top + (bar - s(32.0)) / 2;
     unsafe {
-        MoveWindow(d.add, s(12.0), y, s(130.0), s(32.0), 1);
-        MoveWindow(d.default_btn, s(150.0), y, s(210.0), s(32.0), 1);
-        MoveWindow(d.clear_btn, s(368.0), y, s(140.0), s(32.0), 1);
-        MoveWindow(d.help_btn, s(516.0), y, s(120.0), s(32.0), 1);
+        MoveWindow(d.add, s(12.0), y, s(124.0), s(32.0), 1);
+        MoveWindow(d.clear_btn, s(144.0), y, s(124.0), s(32.0), 1);
+        MoveWindow(d.default_btn, s(276.0), y, s(196.0), s(32.0), 1);
+        MoveWindow(d.help_btn, s(480.0), y, s(112.0), s(32.0), 1);
+        MoveWindow(d.bug_btn, s(600.0), y, s(124.0), s(32.0), 1);
         // a combo box's height includes its drop-down list
-        MoveWindow(d.sort_box, w - s(12.0 + 190.0), y + s(4.0), s(190.0), s(160.0), 1);
+        MoveWindow(d.sort_box, w - s(12.0 + 170.0), y + s(4.0), s(170.0), s(160.0), 1);
         MoveWindow(d.list, 0, 0, w, top, 1);
         MoveWindow(d.empty, 0, top / 2 - s(24.0), w, s(48.0), 1);
         InvalidateRect(d.hwnd, null(), 1); // the strip moved
@@ -1468,7 +1477,11 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         }
         WM_GETMINMAXINFO => {
             // keep the toolbar from overlapping itself
-            (*(lp as *mut MINMAXINFO)).ptMinTrackSize.x = (860.0 * dash().scale) as i32;
+            (*(lp as *mut MINMAXINFO)).ptMinTrackSize.x = (920.0 * dash().scale) as i32;
+            0
+        }
+        WM_COMMAND if wp & 0xFFFF == IDC_BUG => {
+            ShellExecuteW(null_mut(), wide("open").as_ptr(), wide(ISSUES_URL).as_ptr(), null(), null(), SW_SHOWNORMAL);
             0
         }
         WM_COMMAND if wp & 0xFFFF == IDC_HELP => {
@@ -1483,7 +1496,9 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 \u{2022} Right-click for the menu: scale, opacity, rotate / flip, pause, lock, replace image, dashboard and exit.\n\n\
                 LOCK WINDOW\n\
                 \u{2022} A locked image is click-through, so it never gets in the way.\n\
-                \u{2022} To unlock it, hold Ctrl and click the image.";
+                \u{2022} To unlock it, hold Ctrl and click the image.\n\n\
+                FOUND A PROBLEM?\n\
+                \u{2022} Click \"Report a bug\" to open the issue page on GitHub.";
             MessageBoxW(hwnd, wide(text).as_ptr(), wide("How to use GIF Overlay").as_ptr(), MB_OK | MB_ICONINFORMATION);
             0
         }
@@ -1677,16 +1692,17 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     let title = wide("GIF Overlay");
     let hwnd = CreateWindowExW(
         0, class.as_ptr(), title.as_ptr(), WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, s(900.0), s(560.0),
+        CW_USEDEFAULT, CW_USEDEFAULT, s(960.0), s(560.0),
         null_mut(), null_mut(), hinst, null(),
     );
     let child = |class: &str, text: &str, style: u32, id: usize| {
         CreateWindowExW(0, wide(class).as_ptr(), wide(text).as_ptr(), WS_CHILD | style, 0, 0, 0, 0, hwnd, id as HMENU, hinst, null())
     };
     let add = child("BUTTON", "Add image\u{2026}", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_ADD);
-    let default_btn = child("BUTTON", "Set as default viewer\u{2026}", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_DEFAULT);
+    let default_btn = child("BUTTON", "Set as default viewer", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_DEFAULT);
     let clear_btn = child("BUTTON", "Clear history", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_CLEAR);
     let help_btn = child("BUTTON", "How to use", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_HELP);
+    let bug_btn = child("BUTTON", "Report a bug", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_BUG);
     let sort_box = child("COMBOBOX", "", WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | 0x3 /* CBS_DROPDOWNLIST */, IDC_SORT);
     let list = child(
         "SysListView32", "",
@@ -1702,11 +1718,11 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     ncm.cbSize = mem::size_of::<NONCLIENTMETRICSW>() as u32;
     SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, ncm.cbSize, &mut ncm as *mut _ as *mut c_void, 0, dpi);
     let font = CreateFontIndirectW(&ncm.lfMessageFont);
-    for c in [add, default_btn, clear_btn, help_btn, sort_box, list, empty] {
+    for c in [add, default_btn, clear_btn, help_btn, bug_btn, sort_box, list, empty] {
         SendMessageW(c, WM_SETFONT, font as usize, 1);
     }
     // icons: add, settings, trash, help (Segoe Fluent Icons / MDL2 Assets code points)
-    set_button_icons(&[(add, 0xE710), (default_btn, 0xE713), (clear_btn, 0xE74D), (help_btn, 0xE897)], scale);
+    set_button_icons(&[(add, 0xE710), (default_btn, 0xE713), (clear_btn, 0xE74D), (help_btn, 0xE897), (bug_btn, 0xEBE8)], scale);
     let sort = json_val(&fs::read_to_string(exe_file("settings.json")).unwrap_or_default(), "DashSort")
         .and_then(|v| v.parse::<u8>().ok())
         .filter(|&v| v == SORT_RECENT || v == SORT_NAME)
@@ -1718,7 +1734,7 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
 
     let (tw, th) = (s(144.0) as usize, s(112.0) as usize);
     SendMessageW(list, LVM_SETICONSPACING, 0, ((th as isize + s(60.0) as isize) << 16) | (tw as isize + s(28.0) as isize));
-    *dash() = Dash { hwnd, list, add, default_btn, clear_btn, help_btn, sort_box, sort, empty, scale, tw, th, items: Vec::new(), loading: Vec::new() };
+    *dash() = Dash { hwnd, list, add, default_btn, clear_btn, help_btn, bug_btn, sort_box, sort, empty, scale, tw, th, items: Vec::new(), loading: Vec::new() };
     DragAcceptFiles(hwnd, 1);
     layout();
 }
@@ -1790,6 +1806,7 @@ fn main() {
             default_btn: null_mut(),
             clear_btn: null_mut(),
             help_btn: null_mut(),
+            bug_btn: null_mut(),
             sort_box: null_mut(),
             sort: SORT_RECENT,
             empty: null_mut(),
