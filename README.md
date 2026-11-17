@@ -5,6 +5,12 @@
 
 ![GIF Overlay Demo](src/assets/demo1.gif)
 
+## 🎬 Demo Video
+
+<video src="docs/demo.webm" controls muted width="100%"></video>
+
+[▶ Watch the demo video](docs/demo.webm)
+
 ## ✨ Key Features
 
 - **Native Rust + Win32:** A tiny (~300 KB) single exe, no runtime required.
