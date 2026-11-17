@@ -7,7 +7,9 @@
 
 ## 🎬 Demo Video
 
-<video src="docs/demo.webm" controls muted width="100%"></video>
+<video src="https://github.com/n3d06/GIF-Overlay/raw/main/docs/demo.webm" controls muted width="100%"></video>
+
+<video src="https://raw.githubusercontent.com/n3d06/GIF-Overlay/main/docs/demo.webm" controls muted width="100%"></video>
 
 [▶ Watch the demo video](docs/demo.webm)
 
