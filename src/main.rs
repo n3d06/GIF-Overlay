@@ -171,6 +171,9 @@ fn decode_wic(path: &str) -> Result<Decoded, String> {
         if w == 0 || h == 0 {
             return Err("empty image".into());
         }
+        if w as usize * h as usize * 4 > GIF_BUDGET {
+            return Err("image too large".into()); // a failed allocation would abort the whole app
+        }
         let mut px = vec![0u32; w as usize * h as usize];
         conv.CopyPixels(null(), w * 4, slice::from_raw_parts_mut(px.as_mut_ptr() as *mut u8, px.len() * 4))
             .map_err(e)?;
@@ -465,7 +468,11 @@ fn render(a: &App) {
                     }
                 }
             } else {
-                upscale_into(dst, (w, h), f, (a.gw, a.gh), a.rot, (a.flip_h, a.flip_v));
+                if (w, h) == (a.gw, a.gh) && a.rot == 0 && !a.flip_h && !a.flip_v {
+                    dst.copy_from_slice(f); // shown 1:1: nothing to resample
+                } else {
+                    upscale_into(dst, (w, h), f, (a.gw, a.gh), a.rot, (a.flip_h, a.flip_v));
+                }
             }
             // Fully transparent pixels let the mouse fall through the window, so a PNG with a
             // transparent background could not be grabbed there. Alpha 1 is invisible but hit-testable.
@@ -1118,7 +1125,9 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             match wp {
                 T_FRAME if !a.frames.is_empty() => {
                     a.cur = (a.cur + 1) % a.frames.len();
-                    render(a);
+                    if IsIconic(hwnd) == 0 {
+                        render(a); // a minimized window needs no redraw, just keep the animation clock running
+                    }
                     schedule_frame(a);
                 }
                 T_LOCK => lock_tick(a),
