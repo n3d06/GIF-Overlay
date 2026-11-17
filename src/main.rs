@@ -13,7 +13,7 @@ use windows_sys::Win32::{
     System::{DataExchange::COPYDATASTRUCT, LibraryLoader::GetModuleHandleW, Registry::*, Threading::CreateMutexW},
     UI::{
         Controls::{Dialogs::*, *}, HiDpi::*,
-        Input::KeyboardAndMouse::{
+        Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, 
             EnableWindow, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DELETE,
         },
         Shell::*,
@@ -23,6 +23,7 @@ use windows_sys::Win32::{
 
 const T_FRAME: usize = 1;
 const T_SAVE: usize = 2;
+const T_LOCK: usize = 3;
 
 const ID_LOCK: usize = 1;
 const ID_OPEN: usize = 2;
@@ -688,6 +689,7 @@ fn create_overlay(path: &str, d: Decoded) {
         overlays().push(a);
         DragAcceptFiles(hwnd, 1);
         apply(&mut *a, path, d);
+        apply_lock(&*a);
         center(&*a, offset);
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
@@ -834,10 +836,42 @@ fn rotate(a: &mut App, dir: u8) {
     schedule_save(a);
 }
 
+/// A locked window is click-through (WS_EX_TRANSPARENT), so it never gets in the way. Since it then
+/// receives no mouse input, a timer lets the user poke through the lock by holding Ctrl over it,
+/// and click to unlock (the right-click menu works too).
+fn apply_lock(a: &App) {
+    unsafe {
+        if a.locked {
+            SetTimer(a.hwnd, T_LOCK, 80, None);
+        } else {
+            KillTimer(a.hwnd, T_LOCK);
+        }
+        set_click_through(a.hwnd, a.locked);
+    }
+}
+
+unsafe fn set_click_through(hwnd: HWND, on: bool) {
+    let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    let new = if on { ex | WS_EX_TRANSPARENT as isize } else { ex & !(WS_EX_TRANSPARENT as isize) };
+    if new != ex {
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new);
+    }
+}
+
+/// Timer tick of a locked window: interactive only while Ctrl is held with the cursor over it.
+unsafe fn lock_tick(a: &App) {
+    let (mut pt, mut r) = (POINT { x: 0, y: 0 }, mem::zeroed::<RECT>());
+    GetCursorPos(&mut pt);
+    GetWindowRect(a.hwnd, &mut r);
+    let poke = GetAsyncKeyState(VK_CONTROL as i32) < 0 && PtInRect(&r, pt) != 0;
+    set_click_through(a.hwnd, !poke);
+}
+
 fn command(a: &mut App, id: usize) {
     match id {
         ID_LOCK => {
             a.locked = !a.locked;
+            apply_lock(a);
             render(a); // show / hide the handles and the X right away
             schedule_save(a);
         }
@@ -927,7 +961,7 @@ fn context_menu(hwnd: HWND) {
         add(settings, MF_SEPARATOR, 0, "");
         add(settings, MF_STRING, ID_RESET, "Reset to Default");
 
-        add(menu, MF_STRING | check(locked), ID_LOCK, "Lock Window");
+        add(menu, MF_STRING | check(locked), ID_LOCK, "Lock Window (Ctrl+click to unlock)");
         add(menu, MF_SEPARATOR, 0, "");
         add(menu, MF_STRING, ID_HISTORY, "Dashboard");
         add(menu, MF_STRING, ID_OPEN, "Replace this image...");
@@ -960,6 +994,11 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
     let Some(a) = app_of(hwnd) else { return DefWindowProcW(hwnd, msg, wp, lp) };
     match msg {
         WM_LBUTTONDOWN => {
+            if a.locked {
+                // only reachable while Ctrl is held over a locked window (see lock_tick)
+                command(a, ID_LOCK);
+                return 0;
+            }
             let zone = zone_at(a, lp as i16 as i32, (lp >> 16) as i16 as i32);
             if !a.locked {
                 if zone != Zone::None {
@@ -1082,6 +1121,7 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                     render(a);
                     schedule_frame(a);
                 }
+                T_LOCK => lock_tick(a),
                 T_SAVE => {
                     KillTimer(hwnd, T_SAVE);
                     save_settings(a);
@@ -1154,6 +1194,7 @@ fn open_default_apps() {
 }
 const IDC_LIST: usize = 1002;
 const IDC_CLEAR: usize = 1004;
+const IDC_HELP: usize = 1006;
 const IDC_SORT: usize = 1005;
 const SORT_RECENT: u8 = 0;
 const SORT_NAME: u8 = 1;
@@ -1172,6 +1213,7 @@ struct Dash {
     add: HWND,
     default_btn: HWND,
     clear_btn: HWND,
+    help_btn: HWND,
     sort_box: HWND,
     sort: u8, // SORT_RECENT (most recently opened first) or SORT_NAME
     empty: HWND,
@@ -1283,16 +1325,28 @@ fn refresh_dash() {
     }
 }
 
-/// Green dot with a white ring in the top-right corner of a thumbnail.
+/// Mixes `src` over the opaque pixel `dst`; `a` is the coverage 0..1.
+fn mix(dst: u32, src: u32, a: f32) -> u32 {
+    (0..3).fold(0xFF00_0000, |o, i| {
+        let (d, s) = (((dst >> (i * 8)) & 0xFF) as f32, ((src >> (i * 8)) & 0xFF) as f32);
+        o | ((d + (s - d) * a + 0.5) as u32) << (i * 8)
+    })
+}
+
+/// Small green dot with a thin white ring in the top-right corner of a thumbnail.
+/// Edges are anti-aliased from the distance to the circle, so they stay smooth at any DPI.
 fn draw_open_badge(px: &mut [u32], tw: usize, scale: f32) {
-    let r = 9.0 * scale;
-    let (cx, cy) = (tw as f32 - r - 6.0 * scale, r + 6.0 * scale);
+    let (r, ring) = (5.0 * scale, 1.5 * scale);
+    let (cx, cy) = (tw as f32 - r - ring - 6.0 * scale, r + ring + 6.0 * scale);
     let th = px.len() / tw;
     for y in 0..th {
         for x in 0..tw {
             let dist = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
-            if dist <= r + 2.0 * scale {
-                px[y * tw + x] = if dist <= r { 0xFF16_A34A } else { 0xFFFF_FFFF };
+            let outer = (r + ring + 0.5 - dist).clamp(0.0, 1.0);
+            if outer > 0.0 {
+                let p = &mut px[y * tw + x];
+                *p = mix(*p, 0xFFFF_FFFF, outer);
+                *p = mix(*p, 0xFF22_C55E, (r + 0.5 - dist).clamp(0.0, 1.0));
             }
         }
     }
@@ -1337,9 +1391,10 @@ fn layout() {
     };
     let bar = s(52.0);
     unsafe {
-        MoveWindow(d.add, s(12.0), s(10.0), s(120.0), s(32.0), 1);
-        MoveWindow(d.default_btn, s(140.0), s(10.0), s(190.0), s(32.0), 1);
-        MoveWindow(d.clear_btn, s(338.0), s(10.0), s(120.0), s(32.0), 1);
+        MoveWindow(d.add, s(12.0), s(10.0), s(130.0), s(32.0), 1);
+        MoveWindow(d.default_btn, s(150.0), s(10.0), s(210.0), s(32.0), 1);
+        MoveWindow(d.clear_btn, s(368.0), s(10.0), s(140.0), s(32.0), 1);
+        MoveWindow(d.help_btn, s(516.0), s(10.0), s(120.0), s(32.0), 1);
         // a combo box's height includes its drop-down list
         MoveWindow(d.sort_box, w - s(12.0 + 190.0), s(10.0), s(190.0), s(160.0), 1);
         MoveWindow(d.list, 0, bar, w, (h - bar).max(0), 1);
@@ -1377,7 +1432,23 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         }
         WM_GETMINMAXINFO => {
             // keep the toolbar from overlapping itself
-            (*(lp as *mut MINMAXINFO)).ptMinTrackSize.x = (700.0 * dash().scale) as i32;
+            (*(lp as *mut MINMAXINFO)).ptMinTrackSize.x = (860.0 * dash().scale) as i32;
+            0
+        }
+        WM_COMMAND if wp & 0xFFFF == IDC_HELP => {
+            let text = "OPEN AN IMAGE\n\
+                \u{2022} Click \"Add image...\", drop a file here, or double-click a thumbnail.\n\
+                \u{2022} Right-click a thumbnail (or press Delete) to remove it from the history.\n\n\
+                ON AN IMAGE\n\
+                \u{2022} Drag the image to move it. Hover it to show the buttons at the top right: minimize, maximize and close.\n\
+                \u{2022} Drag the right edge, bottom edge or the corner to resize. Ctrl + mouse wheel zooms.\n\
+                \u{2022} Maximize stretches the image over the whole screen; click it again to restore.\n\
+                \u{2022} Drop another file on the image to replace it.\n\
+                \u{2022} Right-click for the menu: scale, opacity, rotate / flip, pause, lock, replace image, dashboard and exit.\n\n\
+                LOCK WINDOW\n\
+                \u{2022} A locked image is click-through, so it never gets in the way.\n\
+                \u{2022} To unlock it, hold Ctrl and click the image.";
+            MessageBoxW(hwnd, wide(text).as_ptr(), wide("How to use GIF Overlay").as_ptr(), MB_OK | MB_ICONINFORMATION);
             0
         }
         WM_COMMAND if wp & 0xFFFF == IDC_CLEAR => {
@@ -1474,6 +1545,93 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
     }
 }
 
+unsafe fn dib(dc: HDC, size: i32, bits: &mut *mut c_void) -> HBITMAP {
+    let mut bi: BITMAPINFO = mem::zeroed();
+    bi.bmiHeader.biSize = mem::size_of::<BITMAPINFOHEADER>() as u32;
+    (bi.bmiHeader.biWidth, bi.bmiHeader.biHeight) = (size, -size);
+    (bi.bmiHeader.biPlanes, bi.bmiHeader.biBitCount, bi.bmiHeader.biCompression) = (1, 32, BI_RGB);
+    CreateDIBSection(dc, &bi, DIB_RGB_COLORS, bits, null_mut(), 0)
+}
+
+/// Draws one glyph of the Segoe icon font into a premultiplied-alpha bitmap.
+/// The glyph is drawn 4x larger and averaged down, which gives smooth edges at 16px
+/// (GDI's own anti-aliasing of hinted small glyphs looks jagged).
+/// Returns None when no icon font is installed (GDI would substitute a text font).
+unsafe fn glyph_bitmap(glyph: u16, size: i32, color: u32) -> Option<HBITMAP> {
+    const SS: i32 = 4;
+    let dc = CreateCompatibleDC(null_mut());
+    let big = size * SS;
+    let mut big_bits: *mut c_void = null_mut();
+    let big_bmp = dib(dc, big, &mut big_bits);
+    let mut bits: *mut c_void = null_mut();
+    let bmp = dib(dc, size, &mut bits);
+    let mut result = None;
+    if !big_bits.is_null() && !bits.is_null() {
+        let old_bmp = SelectObject(dc, big_bmp);
+        // Windows 11 ships "Segoe Fluent Icons"; Windows 10 only has "Segoe MDL2 Assets" (same code points)
+        for name in ["Segoe Fluent Icons", "Segoe MDL2 Assets"] {
+            let face = wide(name);
+            let font = CreateFontW(-(big * 9 / 10), 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET as u32, 0, 0, ANTIALIASED_QUALITY as u32, 0, face.as_ptr());
+            let old_font = SelectObject(dc, font);
+            let mut got = [0u16; 32];
+            GetTextFaceW(dc, got.len() as i32, got.as_mut_ptr());
+            if got[..name.len()] == face[..name.len()] {
+                // white on black, so the coverage of every pixel can be read back from its brightness
+                SetTextColor(dc, 0x00FF_FFFF);
+                SetBkColor(dc, 0);
+                let mut r = RECT { left: 0, top: 0, right: big, bottom: big };
+                DrawTextW(dc, &glyph, 1, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+                let src = slice::from_raw_parts(big_bits as *const u32, (big * big) as usize);
+                let dst = slice::from_raw_parts_mut(bits as *mut u32, (size * size) as usize);
+                let (cr, cg, cb) = (color & 0xFF, (color >> 8) & 0xFF, (color >> 16) & 0xFF);
+                for y in 0..size as usize {
+                    for x in 0..size as usize {
+                        let mut sum = 0;
+                        for sy in 0..SS as usize {
+                            for sx in 0..SS as usize {
+                                sum += (src[(y * SS as usize + sy) * big as usize + x * SS as usize + sx] >> 8) & 0xFF;
+                            }
+                        }
+                        let a = sum / (SS * SS) as u32;
+                        dst[y * size as usize + x] = a << 24 | (cr * a / 255) << 16 | (cg * a / 255) << 8 | (cb * a / 255);
+                    }
+                }
+                result = Some(bmp);
+            }
+            SelectObject(dc, old_font);
+            DeleteObject(font);
+            if result.is_some() {
+                break; // GDI substituted another font otherwise: the loop tries the next one
+            }
+        }
+        SelectObject(dc, old_bmp);
+    }
+    DeleteDC(dc);
+    DeleteObject(big_bmp);
+    if result.is_none() {
+        DeleteObject(bmp);
+    }
+    result
+}
+
+/// Puts an icon to the left of the text of each (button, glyph) pair.
+unsafe fn set_button_icons(buttons: &[(HWND, u16)], scale: f32) {
+    let size = (16.0 * scale).round() as i32;
+    let color = GetSysColor(COLOR_BTNTEXT);
+    for &(btn, glyph) in buttons {
+        let Some(bmp) = glyph_bitmap(glyph, size, color) else { return };
+        let himl = ImageList_Create(size, size, ILC_COLOR32, 1, 0);
+        ImageList_Add(himl, bmp, null_mut());
+        DeleteObject(bmp);
+        let bil = BUTTON_IMAGELIST {
+            himl,
+            margin: RECT { left: (8.0 * scale) as i32, top: 0, right: 0, bottom: 0 },
+            uAlign: BUTTON_IMAGELIST_ALIGN_LEFT,
+        };
+        SendMessageW(btn, BCM_SETIMAGELIST, 0, &bil as *const _ as isize);
+    }
+}
+
 /// Creates the dashboard window and its native child controls.
 unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     let icc = INITCOMMONCONTROLSEX { dwSize: mem::size_of::<INITCOMMONCONTROLSEX>() as u32, dwICC: ICC_LISTVIEW_CLASSES };
@@ -1484,7 +1642,7 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     let title = wide("GIF Overlay");
     let hwnd = CreateWindowExW(
         0, class.as_ptr(), title.as_ptr(), WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, s(860.0), s(560.0),
+        CW_USEDEFAULT, CW_USEDEFAULT, s(900.0), s(560.0),
         null_mut(), null_mut(), hinst, null(),
     );
     let child = |class: &str, text: &str, style: u32, id: usize| {
@@ -1493,6 +1651,7 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     let add = child("BUTTON", "Add image\u{2026}", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_ADD);
     let default_btn = child("BUTTON", "Set as default viewer\u{2026}", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_DEFAULT);
     let clear_btn = child("BUTTON", "Clear history", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_CLEAR);
+    let help_btn = child("BUTTON", "How to use", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_HELP);
     let sort_box = child("COMBOBOX", "", WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | 0x3 /* CBS_DROPDOWNLIST */, IDC_SORT);
     let list = child(
         "SysListView32", "",
@@ -1508,9 +1667,11 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     ncm.cbSize = mem::size_of::<NONCLIENTMETRICSW>() as u32;
     SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, ncm.cbSize, &mut ncm as *mut _ as *mut c_void, 0, dpi);
     let font = CreateFontIndirectW(&ncm.lfMessageFont);
-    for c in [add, default_btn, clear_btn, sort_box, list, empty] {
+    for c in [add, default_btn, clear_btn, help_btn, sort_box, list, empty] {
         SendMessageW(c, WM_SETFONT, font as usize, 1);
     }
+    // icons: add, settings, trash, help (Segoe Fluent Icons / MDL2 Assets code points)
+    set_button_icons(&[(add, 0xE710), (default_btn, 0xE713), (clear_btn, 0xE74D), (help_btn, 0xE897)], scale);
     let sort = json_val(&fs::read_to_string(exe_file("settings.json")).unwrap_or_default(), "DashSort")
         .and_then(|v| v.parse::<u8>().ok())
         .filter(|&v| v == SORT_RECENT || v == SORT_NAME)
@@ -1522,7 +1683,7 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
 
     let (tw, th) = (s(144.0) as usize, s(112.0) as usize);
     SendMessageW(list, LVM_SETICONSPACING, 0, ((th as isize + s(60.0) as isize) << 16) | (tw as isize + s(28.0) as isize));
-    *dash() = Dash { hwnd, list, add, default_btn, clear_btn, sort_box, sort, empty, scale, tw, th, items: Vec::new(), loading: Vec::new() };
+    *dash() = Dash { hwnd, list, add, default_btn, clear_btn, help_btn, sort_box, sort, empty, scale, tw, th, items: Vec::new(), loading: Vec::new() };
     DragAcceptFiles(hwnd, 1);
     layout();
 }
@@ -1593,6 +1754,7 @@ fn main() {
             add: null_mut(),
             default_btn: null_mut(),
             clear_btn: null_mut(),
+            help_btn: null_mut(),
             sort_box: null_mut(),
             sort: SORT_RECENT,
             empty: null_mut(),
