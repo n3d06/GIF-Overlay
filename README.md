@@ -10,7 +10,7 @@
 
 ## ✨ Key Features
 
-- **Native Rust + Win32:** A tiny (~300 KB) single exe, no runtime required.
+- **Native Rust + Win32:** A tiny (under 1 MB) single exe, no runtime required.
 - **Single Instance:** Launching the exe again (or "Open With" on another file) reuses the running app: it brings the dashboard to the front, or opens the file in a new window.
 - **History Dashboard:** Launching the app directly opens a dashboard of the images you opened before (empty on first run). Double-click an item to open it in a new window (you can have several open at once), `Add image` or drag a file in to add one, press Delete or right-click to remove it. "Open With" skips the dashboard.
     - A File / View / Window / Help menu bar holds Add image, Paste, Clear history, Sort, the list of open images (with Minimize all, Restore all, Close all windows), How to use, Set as default viewer and Report a bug.
