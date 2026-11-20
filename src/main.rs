@@ -1803,14 +1803,14 @@ fn layout() {
     let list_h = h - bar;
     let y = (bar - s(32.0)) / 2;
     unsafe {
-        MoveWindow(d.add, s(12.0), y, s(124.0), s(32.0), 1);
-        MoveWindow(d.clear_btn, s(144.0), y, s(124.0), s(32.0), 1);
-        MoveWindow(d.default_btn, s(276.0), y, s(196.0), s(32.0), 1);
-        MoveWindow(d.help_btn, s(480.0), y, s(112.0), s(32.0), 1);
-        MoveWindow(d.bug_btn, s(600.0), y, s(124.0), s(32.0), 1);
+        MoveWindow(d.add, s(12.0), y, s(108.0), s(32.0), 1);
+        MoveWindow(d.clear_btn, s(126.0), y, s(116.0), s(32.0), 1);
+        MoveWindow(d.default_btn, s(248.0), y, s(176.0), s(32.0), 1);
+        MoveWindow(d.help_btn, s(430.0), y, s(104.0), s(32.0), 1);
+        MoveWindow(d.bug_btn, s(540.0), y, s(116.0), s(32.0), 1);
         // a combo box's height includes its drop-down list
-        MoveWindow(d.sort_box, w - s(12.0 + 170.0), y + s(4.0), s(170.0), s(160.0), 1);
-        MoveWindow(d.search, w - s(12.0 + 170.0 + 8.0 + 180.0), y + s(4.0), s(180.0), s(24.0), 1);
+        MoveWindow(d.sort_box, w - s(12.0 + 160.0), y + s(4.0), s(160.0), s(160.0), 1);
+        MoveWindow(d.search, w - s(12.0 + 160.0 + 8.0 + 160.0), y + s(4.0), s(160.0), s(24.0), 1);
         MoveWindow(d.list, 0, bar, w, list_h, 1);
         MoveWindow(d.empty, 0, bar + list_h / 2 - s(24.0), w, s(48.0), 1);
         InvalidateRect(d.hwnd, null(), 1); // the strip moved
@@ -1900,7 +1900,7 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         }
         WM_GETMINMAXINFO => {
             // keep the toolbar from overlapping itself
-            (*(lp as *mut MINMAXINFO)).ptMinTrackSize.x = (1120.0 * dash().scale) as i32;
+            (*(lp as *mut MINMAXINFO)).ptMinTrackSize.x = (1030.0 * dash().scale) as i32;
             0
         }
         WM_COMMAND if wp & 0xFFFF == IDC_BUG => {
@@ -2138,7 +2138,7 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     let title = wide("GIF Overlay");
     let hwnd = CreateWindowExW(
         0, class.as_ptr(), title.as_ptr(), WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, s(1120.0), s(560.0),
+        CW_USEDEFAULT, CW_USEDEFAULT, s(1030.0), s(560.0),
         null_mut(), null_mut(), hinst, null(),
     );
     let child = |class: &str, text: &str, style: u32, id: usize| {
