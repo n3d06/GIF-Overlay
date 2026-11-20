@@ -1852,7 +1852,7 @@ fn remove_item(i: usize) {
 
 /// Height of the search row above the list.
 fn bar_height(d: &Dash) -> i32 {
-    (34.0 * d.scale) as i32
+    (42.0 * d.scale) as i32
 }
 
 fn layout() {
@@ -1869,7 +1869,8 @@ fn layout() {
     let bar = bar_height(d).min(h);
     let list_h = h - bar;
     unsafe {
-        MoveWindow(d.search, s(12.0), (bar - s(20.0)) / 2, (w - s(24.0)).max(0), s(20.0), 1);
+        let sw = s(320.0).min((w - s(24.0)).max(0)); // fixed width, centered
+        MoveWindow(d.search, (w - sw) / 2, (bar - s(24.0)) / 2, sw, s(24.0), 1);
         MoveWindow(d.list, 0, bar, w, list_h, 1);
         MoveWindow(d.empty, 0, bar + list_h / 2 - s(24.0), w, s(48.0), 1);
         InvalidateRect(d.hwnd, null(), 1); // the search row moved
@@ -2212,7 +2213,7 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
         CreateWindowExW(0, wide(class).as_ptr(), wide(text).as_ptr(), WS_CHILD | style, 0, 0, 0, 0, hwnd, id as HMENU, hinst, null())
     };
     let search = CreateWindowExW(
-        0, wide("EDIT").as_ptr(), null(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x80 /* ES_AUTOHSCROLL */,
+        WS_EX_CLIENTEDGE, wide("EDIT").as_ptr(), null(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x80 /* ES_AUTOHSCROLL */,
         0, 0, 0, 0, hwnd, IDC_SEARCH as HMENU, hinst, null(),
     );
     SendMessageW(search, 0x1501 /* EM_SETCUEBANNER */, 1, wide("Search...  (Ctrl+F)").as_ptr() as isize);
