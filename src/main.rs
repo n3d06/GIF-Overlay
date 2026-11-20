@@ -20,7 +20,7 @@ use windows_sys::Win32::{
     UI::{
         Controls::{Dialogs::*, *}, HiDpi::*,
         Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, 
-            GetFocus, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_SPACE, VK_UP,
+            ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_SPACE, VK_UP,
         },
         Shell::*,
         WindowsAndMessaging::*,
@@ -1646,7 +1646,6 @@ const IDC_BUG: usize = 1007;
 const ISSUES_URL: &str = "https://github.com/n3d06/GIF-Overlay/issues";
 const IDC_PASTE: usize = 1009;
 const IDC_QUIT_APP: usize = 1010;
-const IDC_FIND: usize = 1011;
 const IDC_UPDATE: usize = 1012;
 const IDC_WIN_MIN: usize = 1020;
 const IDC_WIN_RESTORE: usize = 1021;
@@ -1656,7 +1655,6 @@ const WIN_MAX: usize = 100;
 const IDC_VERSION: usize = 1013;
 const IDM_SORT_RECENT: usize = 1101;
 const IDM_SORT_NAME: usize = 1102;
-const IDC_SEARCH: usize = 1008;
 const EMPTY_TEXT: &str = "No history yet\r\nUse File > Add image or drop an image here.";
 const SORT_RECENT: u8 = 0;
 const SORT_NAME: u8 = 1;
@@ -1676,8 +1674,6 @@ struct Thumb {
 struct Dash {
     hwnd: HWND,
     list: HWND,
-    search: HWND,
-    hidden: Vec<Thumb>, // thumbnails the search filter hides (kept so clearing it is instant)
     sort: u8, // SORT_RECENT (most recently opened first) or SORT_NAME
     empty: HWND,
     scale: f32, // DPI / 96
@@ -1743,14 +1739,8 @@ fn make_thumb(path: &str, tw: usize, th: usize) -> Option<Thumb> {
 
 fn refresh_dash() {
     let d = dash();
-    let query = unsafe {
-        let mut b = [0u16; 128];
-        let n = GetWindowTextW(d.search, b.as_mut_ptr(), b.len() as i32).max(0) as usize;
-        String::from_utf16_lossy(&b[..n]).trim().to_lowercase()
-    };
     let mut old = mem::take(&mut d.items);
-    old.append(&mut d.hidden);
-    let all: Vec<Thumb> = history_load()
+    d.items = history_load()
         .into_iter()
         .filter(|p| fs::metadata(p).is_ok())
         .filter_map(|p| match old.iter().position(|t| t.path == p) {
@@ -1758,7 +1748,6 @@ fn refresh_dash() {
             None => make_thumb(&p, d.tw, d.th),
         })
         .collect();
-    (d.items, d.hidden) = all.into_iter().partition(|t| t.name.to_lowercase().contains(&query));
     if d.sort == SORT_NAME {
         d.items.sort_by_key(|t| t.name.to_lowercase());
     } // SORT_RECENT keeps the history order, which is newest first
@@ -1790,10 +1779,8 @@ fn refresh_dash() {
             it.pszText = name.as_mut_ptr();
             SendMessageW(d.list, LVM_INSERTITEMW, 0, &it as *const _ as isize);
         }
-        let filtered = d.items.is_empty() && !d.hidden.is_empty();
-        SetWindowTextW(d.empty, wide(if filtered { "No matching images" } else { EMPTY_TEXT }).as_ptr());
         ShowWindow(d.empty, if d.items.is_empty() { SW_SHOW } else { SW_HIDE });
-        EnableMenuItem(GetMenu(d.hwnd), IDC_CLEAR as u32, MF_BYCOMMAND | if !d.items.is_empty() || !d.hidden.is_empty() { MF_ENABLED } else { MF_GRAYED });
+        EnableMenuItem(GetMenu(d.hwnd), IDC_CLEAR as u32, MF_BYCOMMAND | if !d.items.is_empty() { MF_ENABLED } else { MF_GRAYED });
     }
 }
 
@@ -1850,11 +1837,6 @@ fn remove_item(i: usize) {
     refresh_dash();
 }
 
-/// Height of the search row above the list.
-fn bar_height(d: &Dash) -> i32 {
-    (42.0 * d.scale) as i32
-}
-
 fn layout() {
     let d = dash();
     if d.list.is_null() {
@@ -1866,14 +1848,10 @@ fn layout() {
         unsafe { GetClientRect(d.hwnd, &mut r) };
         (r.right, r.bottom)
     };
-    let bar = bar_height(d).min(h);
-    let list_h = h - bar;
+    let list_h = h;
     unsafe {
-        let sw = s(320.0).min((w - s(24.0)).max(0)); // fixed width, centered
-        MoveWindow(d.search, (w - sw) / 2, (bar - s(24.0)) / 2, sw, s(24.0), 1);
-        MoveWindow(d.list, 0, bar, w, list_h, 1);
-        MoveWindow(d.empty, 0, bar + list_h / 2 - s(24.0), w, s(48.0), 1);
-        InvalidateRect(d.hwnd, null(), 1); // the search row moved
+        MoveWindow(d.list, 0, 0, w, list_h, 1);
+        MoveWindow(d.empty, 0, list_h / 2 - s(24.0), w, s(48.0), 1);
     }
 }
 
@@ -1951,9 +1929,6 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             let mut r: RECT = mem::zeroed();
             GetClientRect(hwnd, &mut r);
             FillRect(wp as HDC, &r, GetSysColorBrush(COLOR_WINDOW));
-            r.bottom = bar_height(dash());
-            r.top = r.bottom - 1; // thin line under the search row
-            FillRect(wp as HDC, &r, GetSysColorBrush(COLOR_3DLIGHT));
             1
         }
         WM_GETMINMAXINFO => {
@@ -1970,8 +1945,7 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 \u{2022} Use File > Add image, drop a file here, or double-click a thumbnail.\n\
                 \u{2022} Ctrl+V pastes a screenshot, a copied file, or an image link (http / https).\n\
                 \u{2022} Right-click a thumbnail: Open, Show in folder, Copy path (Ctrl+C), Remove (Delete).\n\
-                \u{2022} Right-click an empty spot for Add image and Paste.\n\
-                \u{2022} Ctrl+F jumps to the search box, which filters the history by file name.\n\n\
+                \u{2022} Right-click an empty spot for Add image and Paste.\n\n\
                 ON AN IMAGE\n\
                 \u{2022} Drag the image to move it. Hover it to show the buttons at the top right: minimize, maximize and close.\n\
                 \u{2022} Drag the right edge, bottom edge or the corner to resize. Ctrl + mouse wheel zooms.\n\
@@ -2060,17 +2034,8 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             }
             0
         }
-        WM_COMMAND if wp & 0xFFFF == IDC_FIND => {
-            SetFocus(dash().search);
-            0
-        }
         WM_COMMAND if wp & 0xFFFF == IDC_QUIT_APP => {
             PostQuitMessage(0);
-            0
-        }
-        // EN_CHANGE = 0x300
-        WM_COMMAND if wp & 0xFFFF == IDC_SEARCH && (wp >> 16) & 0xFFFF == 0x300 => {
-            refresh_dash();
             0
         }
         WM_COMMAND if wp & 0xFFFF == IDC_DEFAULT => {
@@ -2178,8 +2143,6 @@ unsafe fn build_menu(hwnd: HWND, sort: u8) {
     add(file, MF_STRING, IDC_QUIT_APP, "Quit GIF Overlay");
     add(view, MF_STRING, IDM_SORT_RECENT, "Sort by recently opened");
     add(view, MF_STRING, IDM_SORT_NAME, "Sort by name (A\u{2013}Z)");
-    add(view, MF_SEPARATOR, 0, "");
-    add(view, MF_STRING, IDC_FIND, "Search\tCtrl+F");
     add(help, MF_STRING, IDC_HELP, "How to use");
     add(help, MF_STRING, IDC_DEFAULT, "Set as default viewer");
     add(help, MF_SEPARATOR, 0, "");
@@ -2212,12 +2175,6 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     let child = |class: &str, text: &str, style: u32, id: usize| {
         CreateWindowExW(0, wide(class).as_ptr(), wide(text).as_ptr(), WS_CHILD | style, 0, 0, 0, 0, hwnd, id as HMENU, hinst, null())
     };
-    let search = CreateWindowExW(
-        WS_EX_CLIENTEDGE, wide("EDIT").as_ptr(), null(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x80 /* ES_AUTOHSCROLL */,
-        0, 0, 0, 0, hwnd, IDC_SEARCH as HMENU, hinst, null(),
-    );
-    SendMessageW(search, 0x1501 /* EM_SETCUEBANNER */, 1, wide("Search...  (Ctrl+F)").as_ptr() as isize);
-    SendMessageW(search, 0xC5 /* EM_LIMITTEXT */, 100, 0);
     let list = child(
         "SysListView32", "",
         WS_VISIBLE | WS_TABSTOP | LVS_ICON | LVS_AUTOARRANGE | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
@@ -2232,7 +2189,7 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     ncm.cbSize = mem::size_of::<NONCLIENTMETRICSW>() as u32;
     SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, ncm.cbSize, &mut ncm as *mut _ as *mut c_void, 0, dpi);
     let font = CreateFontIndirectW(&ncm.lfMessageFont);
-    for c in [search, list, empty] {
+    for c in [list, empty] {
         SendMessageW(c, WM_SETFONT, font as usize, 1);
     }
     let sort = json_val(&fs::read_to_string(exe_file("settings.json")).unwrap_or_default(), "DashSort")
@@ -2243,7 +2200,7 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
 
     let (tw, th) = (s(144.0) as usize, s(112.0) as usize);
     SendMessageW(list, LVM_SETICONSPACING, 0, ((th as isize + s(60.0) as isize) << 16) | (tw as isize + s(28.0) as isize));
-    *dash() = Dash { hwnd, list, search, hidden: Vec::new(), sort, empty, scale, tw, th, items: Vec::new(), loading: Vec::new() };
+    *dash() = Dash { hwnd, list, sort, empty, scale, tw, th, items: Vec::new(), loading: Vec::new() };
     DragAcceptFiles(hwnd, 1);
     layout();
 }
@@ -2311,8 +2268,6 @@ fn main() {
         DASH = Some(Dash {
             hwnd: null_mut(),
             list: null_mut(),
-            search: null_mut(),
-            hidden: Vec::new(),
             sort: SORT_RECENT,
             empty: null_mut(),
             scale: 1.0,
@@ -2336,12 +2291,8 @@ fn main() {
 
         let mut msg: MSG = mem::zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
-            if msg.message == WM_KEYDOWN && msg.wParam == 0x46 && GetAsyncKeyState(VK_CONTROL as i32) < 0 && (msg.hwnd == dash().hwnd || IsChild(dash().hwnd, msg.hwnd) != 0) {
-                SetFocus(dash().search); // Ctrl+F
-                continue;
-            }
-            // Ctrl+V works in every window of the app (not on key repeat), except while typing in the search box
-            if msg.message == WM_KEYDOWN && msg.wParam == 0x56 && msg.lParam & (1 << 30) == 0 && GetAsyncKeyState(VK_CONTROL as i32) < 0 && GetFocus() != dash().search {
+            // Ctrl+V works in every window of the app (not on key repeat),
+            if msg.message == WM_KEYDOWN && msg.wParam == 0x56 && msg.lParam & (1 << 30) == 0 && GetAsyncKeyState(VK_CONTROL as i32) < 0 {
                 paste();
                 continue;
             }
