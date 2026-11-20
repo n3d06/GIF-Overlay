@@ -10,7 +10,13 @@ use std::{
 use windows_sys::Win32::{
     Foundation::*,
     Graphics::Gdi::*,
-    System::{DataExchange::COPYDATASTRUCT, LibraryLoader::GetModuleHandleW, Registry::*, Threading::CreateMutexW},
+    System::{
+        DataExchange::{CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, COPYDATASTRUCT},
+        LibraryLoader::GetModuleHandleW,
+        Memory::{GlobalLock, GlobalSize, GlobalUnlock},
+        Registry::*,
+        Threading::CreateMutexW,
+    },
     UI::{
         Controls::{Dialogs::*, *}, HiDpi::*,
         Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, 
@@ -36,6 +42,7 @@ const ID_PAUSE: usize = 8;
 const ID_EXIT: usize = 9;
 const ID_HISTORY: usize = 10;
 const ID_QUIT: usize = 11;
+const ID_PASTE: usize = 12;
 const ID_SCALE: usize = 100; // + index into SCALES
 const ID_OPACITY: usize = 200; // + index into OPACITIES
 const SCALES: [u32; 7] = [25, 50, 75, 100, 150, 200, 300];
@@ -104,6 +111,15 @@ fn history_load() -> Vec<String> {
 
 fn history_save(h: &[String]) {
     write_atomic("history.txt", h.join("\n").as_bytes());
+    // pasted / downloaded images only live while they are in the history; the age check spares
+    // a file that was just saved and is still loading (it is not in the history yet)
+    for e in fs::read_dir(exe_file("pasted")).into_iter().flatten().flatten() {
+        let listed = h.iter().any(|p| e.path().to_string_lossy().eq_ignore_ascii_case(p));
+        let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|d| d.as_secs() > 60);
+        if old && !listed {
+            let _ = fs::remove_file(e.path());
+        }
+    }
 }
 
 fn history_push(path: &str) {
@@ -124,16 +140,134 @@ fn history_remove(path: &str) {
 
 type Decoded = (usize, usize, Vec<Vec<u32>>, Vec<u32>);
 
-/// Animated GIFs go through the `gif` crate; every other format (PNG, JPEG, BMP, TIFF, WebP...)
-/// is decoded by the Windows Imaging Component, which adds almost nothing to the exe size.
+/// Animated formats are sniffed by content (GIF / APNG / animated WebP) and decoded by pure-Rust
+/// crates; everything else, and any of those that turn out to be a still image, goes through the
+/// Windows Imaging Component (PNG, JPEG, BMP, TIFF, WebP, AVIF if the codec is installed...).
 fn decode(path: &str, max: usize) -> Result<Decoded, String> {
-    let is_gif = Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("gif"));
-    if is_gif {
-        if let Ok(d) = decode_gif(path, max) {
-            return Ok(d);
+    let mut head = [0u8; 12];
+    let _ = fs::File::open(path).and_then(|mut f| std::io::Read::read(&mut f, &mut head));
+    let anim = if head.starts_with(b"GIF8") {
+        decode_gif(path, max)
+    } else if head.starts_with(b"\x89PNG") {
+        decode_apng(path, max)
+    } else if &head[..4] == b"RIFF" && &head[8..] == b"WEBP" {
+        decode_webp(path, max)
+    } else {
+        Err(String::new())
+    };
+    anim.or_else(|_| decode_wic(path))
+}
+
+/// How many full-canvas frames fit the memory budget (running out of RAM aborts the app).
+fn frame_cap(w: usize, h: usize, max: usize) -> Result<usize, String> {
+    if w == 0 || h == 0 {
+        return Err("empty image".into());
+    }
+    let bytes = w.checked_mul(h).and_then(|n| n.checked_mul(4)).filter(|&b| b <= GIF_BUDGET);
+    Ok(max.min(GIF_BUDGET / bytes.ok_or("image too large")?)) // longer animations are cut to the frames that fit
+}
+
+/// Straight RGBA to the premultiplied 0xAARRGGBB the renderer expects.
+fn premul(r: u8, g: u8, b: u8, a: u8) -> u32 {
+    let m = |c: u8| (c as u32 * a as u32 + 127) / 255;
+    (a as u32) << 24 | m(r) << 16 | m(g) << 8 | m(b)
+}
+
+/// Animated WebP (frames come out already composited). A still WebP returns Err and goes to WIC.
+fn decode_webp(path: &str, max: usize) -> Result<Decoded, String> {
+    let e = |e: image_webp::DecodingError| e.to_string();
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut dec = image_webp::WebPDecoder::new(std::io::BufReader::new(file)).map_err(e)?;
+    if !dec.is_animated() {
+        return Err("still image".into());
+    }
+    let (w, h) = dec.dimensions();
+    let (w, h) = (w as usize, h as usize);
+    let max = frame_cap(w, h, max)?;
+    let ch = if dec.has_alpha() { 4 } else { 3 };
+    let mut buf = vec![0u8; dec.output_buffer_size().ok_or("image too large")?];
+    let (mut frames, mut delays) = (Vec::new(), Vec::new());
+    while frames.len() < max {
+        match dec.read_frame(&mut buf) {
+            Ok(ms) => {
+                frames.push(buf.chunks_exact(ch).map(|p| premul(p[0], p[1], p[2], if ch == 4 { p[3] } else { 255 })).collect());
+                delays.push(if ms <= 10 { 100 } else { ms }); // browsers treat tiny delays as 100ms
+            }
+            Err(_) if !frames.is_empty() => break, // keep what decoded before a corrupt frame
+            Err(err) => return Err(e(err)),
         }
     }
-    decode_wic(path)
+    Ok((w, h, frames, delays))
+}
+
+/// APNG: composites each frame (dispose / blend ops) onto a full canvas. A plain PNG returns Err.
+fn decode_apng(path: &str, max: usize) -> Result<Decoded, String> {
+    use png::{BlendOp, ColorType, DisposeOp};
+    let e = |e: png::DecodingError| e.to_string();
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut dec = png::Decoder::new(std::io::BufReader::new(file));
+    dec.set_transformations(png::Transformations::normalize_to_color8());
+    let mut r = dec.read_info().map_err(e)?;
+    let n = r.info().animation_control().ok_or("still image")?.num_frames as usize;
+    let (gw, gh) = (r.info().width as usize, r.info().height as usize);
+    let max = frame_cap(gw, gh, max)?.min(n);
+    let mut buf = vec![0u8; gw * gh * 4];
+    if r.info().frame_control().is_none() {
+        r.next_frame(&mut buf).map_err(e)?; // the default image is not part of the animation
+    }
+    let mut canvas = vec![0u32; gw * gh];
+    let (mut frames, mut delays) = (Vec::new(), Vec::new());
+    while frames.len() < max {
+        let out = match r.next_frame(&mut buf) {
+            Ok(o) => o,
+            Err(_) if !frames.is_empty() => break,
+            Err(err) => return Err(e(err)),
+        };
+        let Some(fc) = r.info().frame_control().cloned() else { break };
+        let (l, t, w, h) = (fc.x_offset as usize, fc.y_offset as usize, fc.width as usize, fc.height as usize);
+        if l + w > gw || t + h > gh {
+            break; // invalid frame rectangle
+        }
+        let saved = (fc.dispose_op == DisposeOp::Previous).then(|| canvas.clone());
+        let bpp = out.color_type.samples();
+        for y in 0..h {
+            for x in 0..w {
+                let p = &buf[(y * w + x) * bpp..][..bpp];
+                let (rgb, a) = match out.color_type {
+                    ColorType::Grayscale => ([p[0]; 3], 255),
+                    ColorType::GrayscaleAlpha => ([p[0]; 3], p[1]),
+                    ColorType::Rgb => ([p[0], p[1], p[2]], 255),
+                    _ => ([p[0], p[1], p[2]], p[3]),
+                };
+                let src = premul(rgb[0], rgb[1], rgb[2], a);
+                let dst = &mut canvas[(t + y) * gw + l + x];
+                *dst = if fc.blend_op == BlendOp::Source || a == 255 {
+                    src
+                } else {
+                    // premultiplied "over": src + dst * (1 - src alpha)
+                    let k = 255 - a as u32;
+                    (0..4).fold(0, |o, i| o | (((src >> (i * 8)) & 0xFF) + ((*dst >> (i * 8)) & 0xFF) * k / 255).min(255) << (i * 8))
+                };
+            }
+        }
+        frames.push(canvas.clone());
+        let den = if fc.delay_den == 0 { 100 } else { fc.delay_den as u32 };
+        let ms = fc.delay_num as u32 * 1000 / den;
+        delays.push(if ms <= 10 { 100 } else { ms });
+        match fc.dispose_op {
+            DisposeOp::Background => {
+                for y in t..t + h {
+                    canvas[y * gw + l..y * gw + l + w].fill(0);
+                }
+            }
+            DisposeOp::Previous => canvas = saved.unwrap(),
+            DisposeOp::None => {}
+        }
+    }
+    if frames.is_empty() {
+        return Err("no frames".into());
+    }
+    Ok((gw, gh, frames, delays))
 }
 
 /// First frame as premultiplied BGRA, which is exactly what WIC's 32bppPBGRA gives.
@@ -198,15 +332,7 @@ fn decode_gif(path: &str, max: usize) -> Result<Decoded, String> {
     opts.set_color_output(gif::ColorOutput::RGBA);
     let mut dec = opts.read_info(file).map_err(|e| e.to_string())?;
     let (gw, gh) = (dec.width() as usize, dec.height() as usize);
-    if gw == 0 || gh == 0 {
-        return Err("empty image".into());
-    }
-    // memory budget: every frame is a full canvas, and running out of RAM aborts the app
-    let frame_bytes = gw * gh * 4;
-    if frame_bytes > GIF_BUDGET {
-        return Err("image too large".into());
-    }
-    let max = max.min(GIF_BUDGET / frame_bytes); // longer GIFs are cut to the frames that fit
+    let max = frame_cap(gw, gh, max)?;
     let mut canvas = vec![0u32; gw * gh];
     let (mut frames, mut delays) = (Vec::new(), Vec::new());
     while frames.len() < max {
@@ -267,7 +393,7 @@ fn sample(f: &[u32], gw: usize, gh: usize, x: f32, y: f32) -> u32 {
 }
 
 fn open_dialog(owner: HWND) -> Option<String> {
-    let filter: Vec<u16> = "Images\0*.gif;*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp\0GIF Files\0*.gif\0All Files\0*.*\0\0"
+    let filter: Vec<u16> = "Images\0*.gif;*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp;*.apng;*.avif\0GIF Files\0*.gif\0All Files\0*.*\0\0"
         .encode_utf16()
         .collect();
     let title = wide("Select Image");
@@ -849,6 +975,123 @@ fn open_gif(path: &str) {
     }
 }
 
+// ---------- paste: image, file or image link from the clipboard ----------
+
+const CF_DIB: u32 = 8;
+const CF_UNICODETEXT: u32 = 13;
+const CF_HDROP: u32 = 15;
+const WM_FETCHED: u32 = WM_APP + 3;
+
+/// Pasted and downloaded images live here (next to the exe, like history.txt) so the history can reopen them.
+fn pasted_file(name: &str) -> Option<PathBuf> {
+    let dir = exe_file("pasted");
+    fs::create_dir_all(&dir).ok()?;
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    Some(dir.join(format!("{ms}-{name}")))
+}
+
+enum Clip {
+    File(String),
+    Url(String),
+    Image(Vec<u8>, &'static str), // file bytes + extension
+}
+
+unsafe fn clip_bytes(h: HANDLE) -> Option<Vec<u8>> {
+    let p = GlobalLock(h) as *const u8;
+    if p.is_null() {
+        return None;
+    }
+    let v = slice::from_raw_parts(p, GlobalSize(h)).to_vec();
+    GlobalUnlock(h);
+    Some(v)
+}
+
+/// A clipboard DIB is a BMP file minus its 14-byte header; put it back so WIC can decode it.
+fn dib_to_bmp(dib: &[u8]) -> Option<Vec<u8>> {
+    let u32_at = |i: usize| Some(u32::from_le_bytes(dib.get(i..i + 4)?.try_into().ok()?) as usize);
+    let (size, comp, used) = (u32_at(0)?, u32_at(16)?, u32_at(32)?);
+    let bits = u16::from_le_bytes(dib.get(14..16)?.try_into().ok()?) as usize;
+    let masks = if comp == 3 && size == 40 { 12 } else { 0 }; // BI_BITFIELDS stores 3 masks after the header
+    let palette = (if used > 0 { used } else if bits <= 8 { 1 << bits } else { 0 }) * 4;
+    let mut bmp = b"BM".to_vec();
+    bmp.extend_from_slice(&(14 + dib.len() as u32).to_le_bytes());
+    bmp.extend_from_slice(&[0; 4]);
+    bmp.extend_from_slice(&((14 + size + masks + palette) as u32).to_le_bytes());
+    bmp.extend_from_slice(dib);
+    Some(bmp)
+}
+
+/// What the clipboard holds, best first: a copied file, a PNG (keeps transparency), a bitmap, or text
+/// that is an http(s) link / an existing file path.
+unsafe fn read_clipboard() -> Option<Clip> {
+    if OpenClipboard(null_mut()) == 0 {
+        return None;
+    }
+    let r = (|| {
+        if IsClipboardFormatAvailable(CF_HDROP) != 0 {
+            let mut buf = [0u16; 1024];
+            let n = DragQueryFileW(GetClipboardData(CF_HDROP) as HDROP, 0, buf.as_mut_ptr(), buf.len() as u32) as usize;
+            if n > 0 {
+                return Some(Clip::File(String::from_utf16_lossy(&buf[..n])));
+            }
+        }
+        let png = RegisterClipboardFormatW(wide("PNG").as_ptr());
+        if IsClipboardFormatAvailable(png) != 0 {
+            return clip_bytes(GetClipboardData(png)).map(|b| Clip::Image(b, "png"));
+        }
+        if IsClipboardFormatAvailable(CF_DIB) != 0 {
+            return clip_bytes(GetClipboardData(CF_DIB)).and_then(|b| dib_to_bmp(&b)).map(|b| Clip::Image(b, "bmp"));
+        }
+        if IsClipboardFormatAvailable(CF_UNICODETEXT) != 0 {
+            let b = clip_bytes(GetClipboardData(CF_UNICODETEXT))?;
+            let u: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&c| c != 0).collect();
+            let t = String::from_utf16_lossy(&u).trim().trim_matches('"').to_string();
+            if (t.starts_with("http://") || t.starts_with("https://")) && !t.contains(char::is_whitespace) {
+                return Some(Clip::Url(t));
+            }
+            return Path::new(&t).is_file().then_some(Clip::File(t));
+        }
+        None
+    })();
+    CloseClipboard();
+    r
+}
+
+/// Ctrl+V / menu: opens whatever image the clipboard offers in a new window.
+fn paste() {
+    match unsafe { read_clipboard() } {
+        Some(Clip::File(p)) => open_gif(&p),
+        Some(Clip::Url(u)) => fetch(u),
+        Some(Clip::Image(bytes, ext)) => match pasted_file(&format!("paste.{ext}")).filter(|p| fs::write(p, &bytes).is_ok()) {
+            Some(p) => open_gif(&p.to_string_lossy()),
+            None => show_error("Cannot save the pasted image next to the app."),
+        },
+        None => show_error("The clipboard has no image, image file or image link."),
+    }
+}
+
+/// Downloads `url` on a worker thread (shortcut: no size limit or cancel, add if big links hang the title).
+fn fetch(url: String) {
+    unsafe { SetWindowTextW(dash().hwnd, wide("GIF Overlay - downloading...").as_ptr()) };
+    let dash_hwnd = dash().hwnd as usize;
+    std::thread::spawn(move || {
+        use windows::{core::HSTRING, Win32::System::Com::Urlmon::URLDownloadToFileW};
+        let name: String = url.split(['?', '#']).next().unwrap_or("").rsplit('/').next().unwrap_or("")
+            .chars().filter(|c| c.is_ascii_alphanumeric() || ".-_".contains(*c)).take(60).collect();
+        let res: Result<String, String> = pasted_file(if name.is_empty() { "image" } else { &name })
+            .ok_or("Cannot create the pasted folder next to the app.".to_string())
+            .and_then(|p| {
+                unsafe { URLDownloadToFileW(None, &HSTRING::from(url.as_str()), &HSTRING::from(p.as_os_str()), 0, None) }
+                    .map(|_| p.to_string_lossy().into_owned())
+                    .map_err(|e| format!("Download failed: {}", e.message()))
+            });
+        let msg = Box::into_raw(Box::new(res));
+        if unsafe { PostMessageW(dash_hwnd as HWND, WM_FETCHED, 0, msg as isize) } == 0 {
+            drop(unsafe { Box::from_raw(msg) }); // dashboard already gone: the app is quitting
+        }
+    });
+}
+
 fn rotate(a: &mut App, dir: u8) {
     a.rot = (a.rot + dir) % 4;
     if a.restore.is_none() {
@@ -902,6 +1145,7 @@ fn command(a: &mut App, id: usize) {
             }
         }
         ID_HISTORY => show_dash(),
+        ID_PASTE => paste(),
         ID_QUIT => unsafe {
             save_settings(a);
             PostQuitMessage(0); // process exit tears down every overlay
@@ -986,6 +1230,7 @@ fn context_menu(hwnd: HWND) {
         add(menu, MF_SEPARATOR, 0, "");
         add(menu, MF_STRING, ID_HISTORY, "Dashboard");
         add(menu, MF_STRING, ID_OPEN, "Replace this image...");
+        add(menu, MF_STRING, ID_PASTE, "Paste image or link\tCtrl+V");
         add(menu, MF_SEPARATOR, 0, "");
         add(menu, MF_POPUP, settings as usize, "Settings");
         add(menu, MF_STRING | check(paused), ID_PAUSE, "Pause / Play");
@@ -1487,6 +1732,7 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         WM_COMMAND if wp & 0xFFFF == IDC_HELP => {
             let text = "OPEN AN IMAGE\n\
                 \u{2022} Click \"Add image...\", drop a file here, or double-click a thumbnail.\n\
+                \u{2022} Ctrl+V pastes a screenshot, a copied file, or an image link (http / https).\n\
                 \u{2022} Right-click a thumbnail (or press Delete) to remove it from the history.\n\n\
                 ON AN IMAGE\n\
                 \u{2022} Drag the image to move it. Hover it to show the buttons at the top right: minimize, maximize and close.\n\
@@ -1565,6 +1811,16 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         }
         WM_LOADED => {
             finish_load(*Box::from_raw(lp as *mut Loaded));
+            0
+        }
+        WM_FETCHED => {
+            if dash().loading.is_empty() {
+                SetWindowTextW(hwnd, wide("GIF Overlay").as_ptr());
+            }
+            match *Box::from_raw(lp as *mut Result<String, String>) {
+                Ok(p) => open_gif(&p),
+                Err(e) => show_error(&e),
+            }
             0
         }
         // a second launch hands over its file (or nothing) instead of starting another process
@@ -1831,6 +2087,11 @@ fn main() {
 
         let mut msg: MSG = mem::zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+            // Ctrl+V works in every window of the app (not on key repeat)
+            if msg.message == WM_KEYDOWN && msg.wParam == 0x56 && msg.lParam & (1 << 30) == 0 && GetAsyncKeyState(VK_CONTROL as i32) < 0 {
+                paste();
+                continue;
+            }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -1872,6 +2133,44 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Two-frame APNG: red 2x2 canvas, then a half-transparent blue pixel blended over (0,0).
+    #[test]
+    fn apng_composites_frames() {
+        let path = std::env::temp_dir().join("gif_overlay_test.apng");
+        {
+            let mut enc = png::Encoder::new(fs::File::create(&path).unwrap(), 2, 2);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.set_animated(2, 0).unwrap();
+            let mut w = enc.write_header().unwrap();
+            w.set_frame_delay(5, 100).unwrap(); // 50ms
+            w.write_image_data(&[255, 0, 0, 255].repeat(4)).unwrap();
+            w.set_frame_dimension(1, 1).unwrap();
+            w.set_frame_position(0, 0).unwrap();
+            w.set_blend_op(png::BlendOp::Over).unwrap();
+            w.write_image_data(&[0, 0, 255, 128]).unwrap();
+        }
+        let (gw, gh, frames, delays) = decode(path.to_str().unwrap(), usize::MAX).unwrap();
+        assert_eq!((gw, gh, frames.len(), delays[0]), (2, 2, 2, 50));
+        assert_eq!(frames[0][0], 0xFFFF_0000);
+        assert_eq!(frames[1][3], 0xFFFF_0000); // untouched pixel
+        let p = frames[1][0]; // blue (a=128) over red: opaque, red fades to ~127, blue ~128
+        assert_eq!(p >> 24, 255);
+        assert!(((p >> 16) & 0xFF).abs_diff(127) <= 1 && (p & 0xFF).abs_diff(128) <= 1, "{p:08x}");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn dib_gets_a_bmp_header() {
+        let mut dib = vec![0u8; 40 + 4]; // BITMAPINFOHEADER + a pixel stub
+        dib[0] = 40;
+        dib[14] = 24;
+        let bmp = dib_to_bmp(&dib).unwrap();
+        assert_eq!(&bmp[..2], b"BM");
+        assert_eq!(u32::from_le_bytes(bmp[10..14].try_into().unwrap()), 54); // pixels start right after the header
+        assert_eq!(bmp.len(), 14 + dib.len());
     }
 
     /// Run with `cargo test --release -- --ignored --nocapture` to compare speed at full-screen size.

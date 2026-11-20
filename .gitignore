@@ -7,6 +7,7 @@
 # Files the app writes next to the exe while developing
 settings.json
 history.txt
+pasted/
 
 # OS
 .DS_Store
