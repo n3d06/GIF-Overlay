@@ -1174,6 +1174,65 @@ fn show_in_folder(path: &str) {
     let args = wide(&format!("/select,\"{path}\""));
     unsafe { ShellExecuteW(null_mut(), wide("open").as_ptr(), wide("explorer.exe").as_ptr(), args.as_ptr(), null(), SW_SHOWNORMAL) };
 }
+// ---------- version / update check ----------
+
+const VERSION: &str = env!("CARGO_PKG_VERSION"); // stamped from the release tag by the pipeline
+const RELEASES_URL: &str = "https://github.com/n3d06/GIF-Overlay/releases/latest";
+const WM_UPDATE: u32 = WM_APP + 4;
+static CHECKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn version_parts(v: &str) -> Vec<u32> {
+    v.trim_start_matches('v').split('.').map(|p| p.parse().unwrap_or(0)).collect()
+}
+
+/// Asks GitHub for the latest release on a worker thread (only when the user picks Help > Check for
+/// updates); the tag comes back to the dashboard as WM_UPDATE.
+fn check_update() {
+    if CHECKING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return; // already checking
+    }
+    let dash_hwnd = dash().hwnd as usize;
+    std::thread::spawn(move || {
+        use windows::{core::HSTRING, Win32::System::Com::Urlmon::URLDownloadToFileW};
+        let res: Result<String, String> = (|| {
+            let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+            let tmp = std::env::temp_dir().join(format!("gif-overlay-latest-{ms}.json"));
+            // the query string only defeats the download cache
+            let url = format!("https://api.github.com/repos/n3d06/GIF-Overlay/releases/latest?t={ms}");
+            unsafe { URLDownloadToFileW(None, &HSTRING::from(url.as_str()), &HSTRING::from(tmp.as_os_str()), 0, None) }
+                .map_err(|e| e.message())?;
+            let json = fs::read_to_string(&tmp).map_err(|e| e.to_string());
+            let _ = fs::remove_file(&tmp);
+            json_val(&json?, "tag_name").map(|t| t.trim_matches('"').to_string()).ok_or("no release found".to_string())
+        })();
+        let msg = Box::into_raw(Box::new(res));
+        if unsafe { PostMessageW(dash_hwnd as HWND, WM_UPDATE, 0, msg as isize) } == 0 {
+            drop(unsafe { Box::from_raw(msg) });
+        }
+    });
+}
+
+unsafe fn show_update_result(hwnd: HWND, res: Result<String, String>) {
+    CHECKING.store(false, std::sync::atomic::Ordering::SeqCst);
+    let title = wide("Check for updates");
+    match res {
+        Ok(tag) if version_parts(&tag) > version_parts(VERSION) => {
+            let q = wide(&format!("Version {} is available (you have {VERSION}).\nOpen the download page?", tag.trim_start_matches('v')));
+            if MessageBoxW(hwnd, q.as_ptr(), title.as_ptr(), MB_YESNO | MB_ICONINFORMATION) == IDYES {
+                ShellExecuteW(null_mut(), wide("open").as_ptr(), wide(RELEASES_URL).as_ptr(), null(), null(), SW_SHOWNORMAL);
+            }
+        }
+        Ok(_) => {
+            let m = wide(&format!("You are up to date (version {VERSION})."));
+            MessageBoxW(hwnd, m.as_ptr(), title.as_ptr(), MB_OK | MB_ICONINFORMATION);
+        }
+        Err(e) => {
+            let m = wide(&format!("Could not check for updates: {e}"));
+            MessageBoxW(hwnd, m.as_ptr(), title.as_ptr(), MB_OK | MB_ICONERROR);
+        }
+    }
+}
+
 
 fn rotate(a: &mut App, dir: u8) {
     a.rot = (a.rot + dir) % 4;
@@ -1584,6 +1643,8 @@ const ISSUES_URL: &str = "https://github.com/n3d06/GIF-Overlay/issues";
 const IDC_PASTE: usize = 1009;
 const IDC_QUIT_APP: usize = 1010;
 const IDC_FIND: usize = 1011;
+const IDC_UPDATE: usize = 1012;
+const IDC_VERSION: usize = 1013;
 const IDM_SORT_RECENT: usize = 1101;
 const IDM_SORT_NAME: usize = 1102;
 const IDC_SEARCH: usize = 1008;
@@ -1940,6 +2001,14 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             paste();
             0
         }
+        WM_COMMAND if wp & 0xFFFF == IDC_UPDATE => {
+            check_update();
+            0
+        }
+        WM_UPDATE => {
+            show_update_result(hwnd, *Box::from_raw(lp as *mut Result<String, String>));
+            0
+        }
         WM_COMMAND if wp & 0xFFFF == IDC_FIND => {
             SetFocus(dash().search);
             0
@@ -2064,6 +2133,9 @@ unsafe fn build_menu(hwnd: HWND, sort: u8) {
     add(help, MF_STRING, IDC_DEFAULT, "Set as default viewer");
     add(help, MF_SEPARATOR, 0, "");
     add(help, MF_STRING, IDC_BUG, "Report a bug");
+    add(help, MF_SEPARATOR, 0, "");
+    add(help, MF_STRING, IDC_UPDATE, "Check for updates");
+    add(help, MF_STRING | MF_GRAYED, IDC_VERSION, &format!("Version {VERSION}"));
     add(bar, MF_POPUP, file as usize, "File");
     add(bar, MF_POPUP, view as usize, "View");
     add(bar, MF_POPUP, help as usize, "Help");
@@ -2289,6 +2361,13 @@ mod tests {
         assert_eq!(p >> 24, 255);
         assert!(((p >> 16) & 0xFF).abs_diff(127) <= 1 && (p & 0xFF).abs_diff(128) <= 1, "{p:08x}");
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn version_compare() {
+        assert!(version_parts("v1.4.3") > version_parts("1.3.5"));
+        assert!(version_parts("1.10.0") > version_parts("1.9.9")); // numeric, not text, order
+        assert!(version_parts("1.3.5") == version_parts("v1.3.5"));
     }
 
     #[test]
