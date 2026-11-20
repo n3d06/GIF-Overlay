@@ -11,16 +11,16 @@ use windows_sys::Win32::{
     Foundation::*,
     Graphics::Gdi::*,
     System::{
-        DataExchange::{CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, COPYDATASTRUCT},
+        DataExchange::{CloseClipboard, EmptyClipboard, SetClipboardData, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, COPYDATASTRUCT},
         LibraryLoader::GetModuleHandleW,
-        Memory::{GlobalLock, GlobalSize, GlobalUnlock},
+        Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE},
         Registry::*,
         Threading::CreateMutexW,
     },
     UI::{
         Controls::{Dialogs::*, *}, HiDpi::*,
         Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, 
-            EnableWindow, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DELETE,
+            EnableWindow, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_SPACE, VK_UP,
         },
         Shell::*,
         WindowsAndMessaging::*,
@@ -43,6 +43,9 @@ const ID_EXIT: usize = 9;
 const ID_HISTORY: usize = 10;
 const ID_QUIT: usize = 11;
 const ID_PASTE: usize = 12;
+const ID_COPY: usize = 13;
+const ID_FOLDER: usize = 14;
+const ID_TOPMOST: usize = 15;
 const ID_SCALE: usize = 100; // + index into SCALES
 const ID_OPACITY: usize = 200; // + index into OPACITIES
 const SCALES: [u32; 7] = [25, 50, 75, 100, 150, 200, 300];
@@ -1092,6 +1095,86 @@ fn fetch(url: String) {
     });
 }
 
+// ---------- copy to the clipboard ----------
+
+unsafe fn set_clip(format: u32, bytes: &[u8]) {
+    let h = GlobalAlloc(GMEM_MOVEABLE, bytes.len());
+    if h.is_null() {
+        return;
+    }
+    let p = GlobalLock(h) as *mut u8;
+    if p.is_null() {
+        GlobalFree(h);
+        return;
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
+    GlobalUnlock(h);
+    if SetClipboardData(format, h).is_null() {
+        GlobalFree(h); // the clipboard owns the memory only when this succeeds
+    }
+}
+
+fn copy_text(owner: HWND, s: &str) {
+    let bytes: Vec<u8> = wide(s).iter().flat_map(|c| c.to_le_bytes()).collect();
+    unsafe {
+        if OpenClipboard(owner) != 0 {
+            EmptyClipboard();
+            set_clip(CF_UNICODETEXT, &bytes);
+            CloseClipboard();
+        }
+    }
+}
+
+/// Copies the frame on screen at its original size (rotation / flip are not applied) as PNG, which
+/// keeps transparency, plus a plain bitmap on white for apps that only read CF_DIB.
+fn copy_image(a: &App) {
+    let Some(f) = a.frames.get(a.cur) else { return };
+    let (w, h) = (a.gw, a.gh);
+    let mut rgba = Vec::with_capacity(f.len() * 4);
+    let mut dib = Vec::with_capacity(40 + f.len() * 4);
+    for v in [40u32, w as u32, h as u32, 1 | 32 << 16, 0, 0, 0, 0, 0, 0] {
+        dib.extend_from_slice(&v.to_le_bytes()); // BITMAPINFOHEADER: 32 bpp, height > 0 = bottom-up
+    }
+    for p in f {
+        let al = p >> 24;
+        let c = |s: u32| ((p >> s) & 0xFF) as u32;
+        let un = |s: u32| if al == 0 { 0 } else { ((c(s) * 255 + al / 2) / al).min(255) as u8 }; // premultiplied -> straight
+        rgba.extend_from_slice(&[un(16), un(8), un(0), al as u8]);
+    }
+    for row in f.chunks(w).rev() {
+        for p in row {
+            let al = p >> 24;
+            for s in [0, 8, 16] {
+                dib.push((((p >> s) & 0xFF) + (255 - al)).min(255) as u8); // over white
+            }
+            dib.push(255);
+        }
+    }
+    let mut png_bytes = Vec::new();
+    let ok = (|| {
+        let mut enc = png::Encoder::new(&mut png_bytes, w as u32, h as u32);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header().ok()?.write_image_data(&rgba).ok()
+    })()
+    .is_some();
+    unsafe {
+        if OpenClipboard(a.hwnd) != 0 {
+            EmptyClipboard();
+            if ok {
+                set_clip(RegisterClipboardFormatW(wide("PNG").as_ptr()), &png_bytes);
+            }
+            set_clip(CF_DIB, &dib);
+            CloseClipboard();
+        }
+    }
+}
+
+fn show_in_folder(path: &str) {
+    let args = wide(&format!("/select,\"{path}\""));
+    unsafe { ShellExecuteW(null_mut(), wide("open").as_ptr(), wide("explorer.exe").as_ptr(), args.as_ptr(), null(), SW_SHOWNORMAL) };
+}
+
 fn rotate(a: &mut App, dir: u8) {
     a.rot = (a.rot + dir) % 4;
     if a.restore.is_none() {
@@ -1146,6 +1229,12 @@ fn command(a: &mut App, id: usize) {
         }
         ID_HISTORY => show_dash(),
         ID_PASTE => paste(),
+        ID_COPY => copy_image(a),
+        ID_FOLDER => show_in_folder(&a.path),
+        ID_TOPMOST => unsafe {
+            let top = GetWindowLongPtrW(a.hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST as isize != 0;
+            SetWindowPos(a.hwnd, if top { HWND_NOTOPMOST } else { HWND_TOPMOST }, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        },
         ID_QUIT => unsafe {
             save_settings(a);
             PostQuitMessage(0); // process exit tears down every overlay
@@ -1204,6 +1293,8 @@ fn context_menu(hwnd: HWND) {
         // firing (and the window could even be closed), so no reference may be held across it.
         let Some(a) = app_of(hwnd) else { return };
         let (opacity, locked, flip_h, flip_v, paused) = (a.opacity, a.locked, a.flip_h, a.flip_v, a.paused);
+        let animated = a.frames.len() > 1;
+        let topmost = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST as isize != 0;
         let add =|m: HMENU, flags: u32, id: usize, text: &str| {
             AppendMenuW(m, flags, id, wide(text).as_ptr());
         };
@@ -1231,11 +1322,17 @@ fn context_menu(hwnd: HWND) {
         add(menu, MF_STRING, ID_HISTORY, "Dashboard");
         add(menu, MF_STRING, ID_OPEN, "Replace this image...");
         add(menu, MF_STRING, ID_PASTE, "Paste image or link\tCtrl+V");
+        add(menu, MF_STRING, ID_COPY, "Copy image\tCtrl+C");
+        add(menu, MF_STRING, ID_FOLDER, "Show in folder");
         add(menu, MF_SEPARATOR, 0, "");
         add(menu, MF_POPUP, settings as usize, "Settings");
-        add(menu, MF_STRING | check(paused), ID_PAUSE, "Pause / Play");
+        add(menu, MF_STRING | check(topmost), ID_TOPMOST, "Always on Top");
+        if animated {
+            add(menu, MF_STRING | check(paused), ID_PAUSE, "Pause / Play\tSpace");
+        }
         add(menu, MF_SEPARATOR, 0, "");
-        add(menu, MF_STRING, ID_QUIT, "Exit app");
+        add(menu, MF_STRING, ID_EXIT, "Close window\tEsc");
+        add(menu, MF_STRING, ID_QUIT, "Quit GIF Overlay");
 
         let mut pt = POINT { x: 0, y: 0 };
         GetCursorPos(&mut pt);
@@ -1366,6 +1463,25 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             context_menu(hwnd);
             0
         }
+        WM_KEYDOWN => {
+            let first = lp & (1 << 30) == 0; // ignore auto-repeat for the one-shot keys
+            match wp as u16 {
+                VK_ESCAPE if first => {
+                    command(a, ID_EXIT); // destroys the window: `a` is gone after this
+                    return 0;
+                }
+                VK_SPACE if first && a.frames.len() > 1 => command(a, ID_PAUSE),
+                VK_UP | VK_DOWN => {
+                    let step = if wp as u16 == VK_UP { 10 } else { -10 };
+                    a.opacity = (a.opacity as i32 + step).clamp(10, 100) as u32;
+                    render(a);
+                    schedule_save(a);
+                }
+                0x43 if first && GetAsyncKeyState(VK_CONTROL as i32) < 0 => command(a, ID_COPY), // Ctrl+C
+                _ => {}
+            }
+            0
+        }
         WM_DROPFILES => {
             // dropping on an overlay swaps its image; the dashboard is where new windows are opened
             if let Some(p) = dropped_file(wp) {
@@ -1470,6 +1586,10 @@ const SORT_RECENT: u8 = 0;
 const SORT_NAME: u8 = 1;
 const IDM_OPEN: usize = 1;
 const IDM_REMOVE: usize = 2;
+const IDM_FOLDER: usize = 3;
+const IDM_COPYPATH: usize = 4;
+const IDM_ADD: usize = 5;
+const IDM_PASTE: usize = 6;
 
 struct Thumb {
     path: String,
@@ -1681,19 +1801,61 @@ fn layout() {
     }
 }
 
-fn context_menu_dash(hwnd: HWND) {
-    let Some(i) = selected() else { return };
+/// Right-click menu of the list: item actions when the click lands on a thumbnail, otherwise
+/// Add / Paste. `lp` is the screen position, or -1 when opened from the keyboard (Menu / Shift+F10).
+fn context_menu_dash(hwnd: HWND, lp: LPARAM) {
     unsafe {
+        let list = dash().list;
+        let (mut pt, item) = if lp == -1 {
+            let i = selected();
+            let mut r: RECT = mem::zeroed();
+            if let Some(i) = i {
+                SendMessageW(list, LVM_GETITEMRECT, i, &mut r as *mut RECT as isize); // r.left = 0 = LVIR_BOUNDS
+            }
+            (POINT { x: r.left + 8, y: r.top + 8 }, i)
+        } else {
+            let mut pt = POINT { x: lp as i16 as i32, y: (lp >> 16) as i16 as i32 };
+            ScreenToClient(list, &mut pt);
+            let mut hit: LVHITTESTINFO = mem::zeroed();
+            hit.pt = pt;
+            SendMessageW(list, LVM_HITTEST, 0, &mut hit as *mut LVHITTESTINFO as isize);
+            (pt, (hit.iItem >= 0 && hit.flags & (LVHT_ONITEMICON | LVHT_ONITEMLABEL) != 0).then_some(hit.iItem as usize))
+        };
+        ClientToScreen(list, &mut pt);
         let menu = CreatePopupMenu();
-        AppendMenuW(menu, MF_STRING, IDM_OPEN, wide("Open").as_ptr());
-        AppendMenuW(menu, MF_STRING, IDM_REMOVE, wide("Remove from history").as_ptr());
-        let mut pt = POINT { x: 0, y: 0 };
-        GetCursorPos(&mut pt);
+        let add = |flags: u32, id: usize, text: &str| {
+            AppendMenuW(menu, flags, id, wide(text).as_ptr());
+        };
+        if let Some(i) = item {
+            let exists = Path::new(&dash().items[i].path).exists();
+            add(MF_STRING, IDM_OPEN, "Open");
+            add(MF_STRING | if exists { 0 } else { MF_GRAYED }, IDM_FOLDER, "Show in folder");
+            add(MF_STRING, IDM_COPYPATH, "Copy path");
+            add(MF_SEPARATOR, 0, "");
+            add(MF_STRING, IDM_REMOVE, "Remove from history");
+            SetMenuDefaultItem(menu, IDM_OPEN as u32, 0); // double-click action in bold
+        } else {
+            add(MF_STRING, IDM_ADD, "Add image...");
+            add(MF_STRING, IDM_PASTE, "Paste image or link\tCtrl+V");
+        }
         let id = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, null());
         DestroyMenu(menu);
-        match id as usize {
-            IDM_OPEN => open_item(i),
-            IDM_REMOVE => remove_item(i),
+        // the list may have been refreshed while the menu was open: re-check the index
+        let path = item.and_then(|i| dash().items.get(i)).map(|t| t.path.clone());
+        match (id as usize, path) {
+            (IDM_OPEN, Some(p)) => open_gif(&p),
+            (IDM_FOLDER, Some(p)) => show_in_folder(&p),
+            (IDM_COPYPATH, Some(p)) => copy_text(hwnd, &p),
+            (IDM_REMOVE, Some(p)) => {
+                history_remove(&p);
+                refresh_dash();
+            }
+            (IDM_ADD, _) => {
+                if let Some(p) = open_dialog(hwnd) {
+                    open_gif(&p);
+                }
+            }
+            (IDM_PASTE, _) => paste(),
             _ => {}
         }
     }
@@ -1733,13 +1895,15 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             let text = "OPEN AN IMAGE\n\
                 \u{2022} Click \"Add image...\", drop a file here, or double-click a thumbnail.\n\
                 \u{2022} Ctrl+V pastes a screenshot, a copied file, or an image link (http / https).\n\
-                \u{2022} Right-click a thumbnail (or press Delete) to remove it from the history.\n\n\
+                \u{2022} Right-click a thumbnail: Open, Show in folder, Copy path (Ctrl+C), Remove (Delete).\n\
+                \u{2022} Right-click an empty spot for Add image and Paste.\n\n\
                 ON AN IMAGE\n\
                 \u{2022} Drag the image to move it. Hover it to show the buttons at the top right: minimize, maximize and close.\n\
                 \u{2022} Drag the right edge, bottom edge or the corner to resize. Ctrl + mouse wheel zooms.\n\
                 \u{2022} Maximize stretches the image over the whole screen; click it again to restore.\n\
                 \u{2022} Drop another file on the image to replace it.\n\
-                \u{2022} Right-click for the menu: scale, opacity, rotate / flip, pause, lock, replace image, dashboard and exit.\n\n\
+                \u{2022} Right-click for the menu: scale, opacity, rotate / flip, pause, lock, always on top, copy image, show in folder, replace image, dashboard, close and quit.\n\
+                \u{2022} Keys: Esc closes, Space pauses, Up / Down change the opacity, Ctrl+C copies the image.\n\n\
                 LOCK WINDOW\n\
                 \u{2022} A locked image is click-through, so it never gets in the way.\n\
                 \u{2022} To unlock it, hold Ctrl and click the image.\n\n\
@@ -1786,6 +1950,10 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                         if let Some(i) = selected() {
                             remove_item(i);
                         }
+                    } else if key == 0x43 && GetAsyncKeyState(VK_CONTROL as i32) < 0 {
+                        if let Some(i) = selected() {
+                            copy_text(hwnd, &dash().items[i].path);
+                        }
                     }
                 }
             }
@@ -1793,7 +1961,7 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         }
         WM_CONTEXTMENU => {
             if wp as HWND == dash().list {
-                context_menu_dash(hwnd);
+                context_menu_dash(hwnd, lp);
             }
             0
         }
