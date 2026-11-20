@@ -1581,9 +1581,13 @@ const IDC_CLEAR: usize = 1004;
 const IDC_HELP: usize = 1006;
 const IDC_BUG: usize = 1007;
 const ISSUES_URL: &str = "https://github.com/n3d06/GIF-Overlay/issues";
-const IDC_SORT: usize = 1005;
+const IDC_PASTE: usize = 1009;
+const IDC_QUIT_APP: usize = 1010;
+const IDC_FIND: usize = 1011;
+const IDM_SORT_RECENT: usize = 1101;
+const IDM_SORT_NAME: usize = 1102;
 const IDC_SEARCH: usize = 1008;
-const EMPTY_TEXT: &str = "No history yet\r\nClick \"Add image\" or drop an image here.";
+const EMPTY_TEXT: &str = "No history yet\r\nUse File > Add image or drop an image here.";
 const SORT_RECENT: u8 = 0;
 const SORT_NAME: u8 = 1;
 const IDM_OPEN: usize = 1;
@@ -1602,10 +1606,8 @@ struct Thumb {
 struct Dash {
     hwnd: HWND,
     list: HWND,
-    toolbar: HWND,
     search: HWND,
     hidden: Vec<Thumb>, // thumbnails the search filter hides (kept so clearing it is instant)
-    sort_box: HWND,
     sort: u8, // SORT_RECENT (most recently opened first) or SORT_NAME
     empty: HWND,
     scale: f32, // DPI / 96
@@ -1721,7 +1723,7 @@ fn refresh_dash() {
         let filtered = d.items.is_empty() && !d.hidden.is_empty();
         SetWindowTextW(d.empty, wide(if filtered { "No matching images" } else { EMPTY_TEXT }).as_ptr());
         ShowWindow(d.empty, if d.items.is_empty() { SW_SHOW } else { SW_HIDE });
-        SendMessageW(d.toolbar, TB_ENABLEBUTTON, IDC_CLEAR, (!d.items.is_empty() || !d.hidden.is_empty()) as isize);
+        EnableMenuItem(GetMenu(d.hwnd), IDC_CLEAR as u32, MF_BYCOMMAND | if !d.items.is_empty() || !d.hidden.is_empty() { MF_ENABLED } else { MF_GRAYED });
     }
 }
 
@@ -1780,7 +1782,7 @@ fn remove_item(i: usize) {
 
 /// Height of the command strip at the top of the dashboard (like a toolbar).
 fn bar_height(d: &Dash) -> i32 {
-    (52.0 * d.scale) as i32
+    (44.0 * d.scale) as i32
 }
 
 fn layout() {
@@ -1798,10 +1800,8 @@ fn layout() {
     let list_h = h - bar;
     let y = (bar - s(32.0)) / 2;
     unsafe {
-        MoveWindow(d.toolbar, s(8.0), y, w - s(8.0 + 8.0 + 12.0 + 160.0 + 8.0 + 160.0), s(32.0), 1);
         // a combo box's height includes its drop-down list
-        MoveWindow(d.sort_box, w - s(12.0 + 160.0), y + s(4.0), s(160.0), s(160.0), 1);
-        MoveWindow(d.search, w - s(12.0 + 160.0 + 8.0 + 160.0), y + s(4.0), s(160.0), s(24.0), 1);
+        MoveWindow(d.search, s(12.0), y + s(4.0), s(260.0), s(24.0), 1);
         MoveWindow(d.list, 0, bar, w, list_h, 1);
         MoveWindow(d.empty, 0, bar + list_h / 2 - s(24.0), w, s(48.0), 1);
         InvalidateRect(d.hwnd, null(), 1); // the strip moved
@@ -1890,8 +1890,8 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             1
         }
         WM_GETMINMAXINFO => {
-            // keep the toolbar from overlapping itself
-            (*(lp as *mut MINMAXINFO)).ptMinTrackSize.x = (1030.0 * dash().scale) as i32;
+            // keep the menu bar from wrapping
+            (*(lp as *mut MINMAXINFO)).ptMinTrackSize.x = (560.0 * dash().scale) as i32;
             0
         }
         WM_COMMAND if wp & 0xFFFF == IDC_BUG => {
@@ -1900,7 +1900,7 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         }
         WM_COMMAND if wp & 0xFFFF == IDC_HELP => {
             let text = "OPEN AN IMAGE\n\
-                \u{2022} Click \"Add image\", drop a file here, or double-click a thumbnail.\n\
+                \u{2022} Use File > Add image, drop a file here, or double-click a thumbnail.\n\
                 \u{2022} Ctrl+V pastes a screenshot, a copied file, or an image link (http / https).\n\
                 \u{2022} Right-click a thumbnail: Open, Show in folder, Copy path (Ctrl+C), Remove (Delete).\n\
                 \u{2022} Right-click an empty spot for Add image and Paste.\n\
@@ -1916,7 +1916,7 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 \u{2022} A locked image is click-through, so it never gets in the way.\n\
                 \u{2022} To unlock it, hold Ctrl and click the image.\n\n\
                 FOUND A PROBLEM?\n\
-                \u{2022} Click \"Report a bug\" to open the issue page on GitHub.";
+                \u{2022} Use Help > Report a bug to open the issue page on GitHub.";
             MessageBoxW(hwnd, wide(text).as_ptr(), wide("How to use GIF Overlay").as_ptr(), MB_OK | MB_ICONINFORMATION);
             0
         }
@@ -1928,13 +1928,24 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             }
             0
         }
-        // CBN_SELCHANGE = 1
-        WM_COMMAND if wp & 0xFFFF == IDC_SORT && (wp >> 16) & 0xFFFF == 1 => {
-            let d = dash();
-            d.sort = SendMessageW(d.sort_box, CB_GETCURSEL, 0, 0).max(0) as u8;
+        WM_COMMAND if matches!(wp & 0xFFFF, IDM_SORT_RECENT | IDM_SORT_NAME) => {
+            let id = wp & 0xFFFF;
+            dash().sort = if id == IDM_SORT_NAME { SORT_NAME } else { SORT_RECENT };
+            CheckMenuRadioItem(GetSubMenu(GetMenu(hwnd), 1), IDM_SORT_RECENT as u32, IDM_SORT_NAME as u32, id as u32, MF_BYCOMMAND);
             write_settings(saved_opacity()); // remember the choice
             refresh_dash();
-            SetFocus(d.list);
+            0
+        }
+        WM_COMMAND if wp & 0xFFFF == IDC_PASTE => {
+            paste();
+            0
+        }
+        WM_COMMAND if wp & 0xFFFF == IDC_FIND => {
+            SetFocus(dash().search);
+            0
+        }
+        WM_COMMAND if wp & 0xFFFF == IDC_QUIT_APP => {
+            PostQuitMessage(0);
             0
         }
         // EN_CHANGE = 0x300
@@ -1954,15 +1965,7 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         }
         WM_NOTIFY => {
             let nm = &*(lp as *const NMHDR);
-            if nm.hwndFrom == dash().toolbar && nm.code == TBN_GETINFOTIPW {
-                let tip = &mut *(lp as *mut NMTBGETINFOTIPW);
-                let text = TOOLBAR.iter().find(|b| b.0 as i32 == tip.iItem).map_or("", |b| b.3);
-                let n = text.encode_utf16().count().min(tip.cchTextMax.max(1) as usize - 1);
-                for (i, c) in text.encode_utf16().take(n).enumerate() {
-                    *tip.pszText.add(i) = c;
-                }
-                *tip.pszText.add(n) = 0;
-            } else if nm.hwndFrom == dash().list {
+            if nm.hwndFrom == dash().list {
                 if nm.code == LVN_ITEMACTIVATE {
                     open_item((*(lp as *const NMITEMACTIVATE)).iItem as usize);
                 } else if nm.code == LVN_KEYDOWN {
@@ -2040,139 +2043,38 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
     }
 }
 
-unsafe fn dib(dc: HDC, size: i32, bits: &mut *mut c_void) -> HBITMAP {
-    let mut bi: BITMAPINFO = mem::zeroed();
-    bi.bmiHeader.biSize = mem::size_of::<BITMAPINFOHEADER>() as u32;
-    (bi.bmiHeader.biWidth, bi.bmiHeader.biHeight) = (size, -size);
-    (bi.bmiHeader.biPlanes, bi.bmiHeader.biBitCount, bi.bmiHeader.biCompression) = (1, 32, BI_RGB);
-    CreateDIBSection(dc, &bi, DIB_RGB_COLORS, bits, null_mut(), 0)
-}
-
-/// Draws one glyph of the Segoe icon font into a premultiplied-alpha bitmap.
-/// The glyph is drawn 4x larger and averaged down, which gives smooth edges at 16px
-/// (GDI's own anti-aliasing of hinted small glyphs looks jagged).
-/// Returns None when no icon font is installed (GDI would substitute a text font).
-unsafe fn glyph_bitmap(glyph: u16, size: i32, color: u32) -> Option<HBITMAP> {
-    const SS: i32 = 4;
-    let dc = CreateCompatibleDC(null_mut());
-    let big = size * SS;
-    let mut big_bits: *mut c_void = null_mut();
-    let big_bmp = dib(dc, big, &mut big_bits);
-    let mut bits: *mut c_void = null_mut();
-    let bmp = dib(dc, size, &mut bits);
-    let mut result = None;
-    if !big_bits.is_null() && !bits.is_null() {
-        let old_bmp = SelectObject(dc, big_bmp);
-        // Windows 11 ships "Segoe Fluent Icons"; Windows 10 only has "Segoe MDL2 Assets" (same code points)
-        for name in ["Segoe Fluent Icons", "Segoe MDL2 Assets"] {
-            let face = wide(name);
-            let font = CreateFontW(-(big * 9 / 10), 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET as u32, 0, 0, ANTIALIASED_QUALITY as u32, 0, face.as_ptr());
-            let old_font = SelectObject(dc, font);
-            let mut got = [0u16; 32];
-            GetTextFaceW(dc, got.len() as i32, got.as_mut_ptr());
-            if got[..name.len()] == face[..name.len()] {
-                // white on black, so the coverage of every pixel can be read back from its brightness
-                SetTextColor(dc, 0x00FF_FFFF);
-                SetBkColor(dc, 0);
-                let mut r = RECT { left: 0, top: 0, right: big, bottom: big };
-                DrawTextW(dc, &glyph, 1, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
-                let src = slice::from_raw_parts(big_bits as *const u32, (big * big) as usize);
-                let dst = slice::from_raw_parts_mut(bits as *mut u32, (size * size) as usize);
-                let (cr, cg, cb) = (color & 0xFF, (color >> 8) & 0xFF, (color >> 16) & 0xFF);
-                for y in 0..size as usize {
-                    for x in 0..size as usize {
-                        let mut sum = 0;
-                        for sy in 0..SS as usize {
-                            for sx in 0..SS as usize {
-                                sum += (src[(y * SS as usize + sy) * big as usize + x * SS as usize + sx] >> 8) & 0xFF;
-                            }
-                        }
-                        let a = sum / (SS * SS) as u32;
-                        dst[y * size as usize + x] = a << 24 | (cr * a / 255) << 16 | (cg * a / 255) << 8 | (cb * a / 255);
-                    }
-                }
-                result = Some(bmp);
-            }
-            SelectObject(dc, old_font);
-            DeleteObject(font);
-            if result.is_some() {
-                break; // GDI substituted another font otherwise: the loop tries the next one
-            }
-        }
-        SelectObject(dc, old_bmp);
-    }
-    DeleteDC(dc);
-    DeleteObject(big_bmp);
-    if result.is_none() {
-        DeleteObject(bmp);
-    }
-    result
-}
-
-/// Dashboard toolbar: (command id, icon glyph, label, tooltip).
-const TOOLBAR: [(usize, u16, &str, &str); 5] = [
-    (IDC_ADD, 0xE710, "Add image", "Add an image from a file (you can also drop or paste one)"),
-    (IDC_CLEAR, 0xE74D, "Clear history", "Empty the history list (your image files are not deleted)"),
-    (IDC_DEFAULT, 0xE713, "Set as default viewer", "Choose GIF Overlay as the default app for GIF files"),
-    (IDC_HELP, 0xE897, "How to use", "Tips and keyboard shortcuts"),
-    (IDC_BUG, 0xEBE8, "Report a bug", "Open the issue page on GitHub"),
-];
-
-/// Native toolbar with an icon and a label per button; tooltips come from `TBN_GETINFOTIPW`.
-/// Clicks arrive as WM_COMMAND with the button's id.
-unsafe fn create_toolbar(parent: HWND, hinst: HINSTANCE, font: HFONT, scale: f32) -> HWND {
-    let tb = CreateWindowExW(
-        0, wide("ToolbarWindow32").as_ptr(), null(),
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBSTYLE_FLAT | TBSTYLE_LIST | TBSTYLE_TOOLTIPS | TBSTYLE_TRANSPARENT | CCS_NODIVIDER as u32 | CCS_NORESIZE as u32,
-        0, 0, 0, 0, parent, null_mut(), hinst, null(),
-    );
-    SetWindowTheme(tb, wide("Explorer").as_ptr(), null());
-    SendMessageW(tb, WM_SETFONT, font as usize, 1);
-    SendMessageW(tb, TB_BUTTONSTRUCTSIZE, mem::size_of::<TBBUTTON>(), 0);
-    SendMessageW(tb, TB_SETPADDING, 0, (((8.0 * scale) as isize) << 16) | (16.0 * scale) as isize);
-    // icons come from the Segoe icon font; without it the buttons just show their labels
-    let size = (16.0 * scale).round() as i32;
-    let color = GetSysColor(COLOR_BTNTEXT);
-    let himl = ImageList_Create(size, size, ILC_COLOR32, TOOLBAR.len() as i32, 0);
-    let mut icons = true;
-    for b in &TOOLBAR {
-        match glyph_bitmap(b.1, size, color) {
-            Some(bmp) => {
-                ImageList_Add(himl, bmp, null_mut());
-                DeleteObject(bmp);
-            }
-            None => {
-                icons = false;
-                break;
-            }
-        }
-    }
-    if icons {
-        SendMessageW(tb, TB_SETIMAGELIST, 0, himl as isize);
-    } else {
-        ImageList_Destroy(himl);
-    }
-    let labels: Vec<Vec<u16>> = TOOLBAR.iter().map(|b| wide(b.2)).collect();
-    let buttons: Vec<TBBUTTON> = TOOLBAR
-        .iter()
-        .enumerate()
-        .map(|(i, b)| TBBUTTON {
-            iBitmap: if icons { i as i32 } else { I_IMAGENONE },
-            idCommand: b.0 as i32,
-            fsState: TBSTATE_ENABLED as u8,
-            fsStyle: (BTNS_BUTTON | BTNS_AUTOSIZE) as u8,
-            bReserved: [0; 6],
-            dwData: 0,
-            iString: labels[i].as_ptr() as isize,
-        })
-        .collect();
-    SendMessageW(tb, TB_ADDBUTTONSW, buttons.len(), buttons.as_ptr() as isize);
-    tb
+/// Menu bar of the dashboard: File / View / Help. Commands reuse the old button ids.
+unsafe fn build_menu(hwnd: HWND, sort: u8) {
+    let bar = CreateMenu();
+    let (file, view, help) = (CreatePopupMenu(), CreatePopupMenu(), CreatePopupMenu());
+    let add = |m: HMENU, flags: u32, id: usize, text: &str| {
+        AppendMenuW(m, flags, id, wide(text).as_ptr());
+    };
+    add(file, MF_STRING, IDC_ADD, "Add image");
+    add(file, MF_STRING, IDC_PASTE, "Paste image or link\tCtrl+V");
+    add(file, MF_SEPARATOR, 0, "");
+    add(file, MF_STRING, IDC_CLEAR, "Clear history");
+    add(file, MF_SEPARATOR, 0, "");
+    add(file, MF_STRING, IDC_QUIT_APP, "Quit GIF Overlay");
+    add(view, MF_STRING, IDM_SORT_RECENT, "Sort by recently opened");
+    add(view, MF_STRING, IDM_SORT_NAME, "Sort by name (A\u{2013}Z)");
+    add(view, MF_SEPARATOR, 0, "");
+    add(view, MF_STRING, IDC_FIND, "Search\tCtrl+F");
+    add(help, MF_STRING, IDC_HELP, "How to use");
+    add(help, MF_STRING, IDC_DEFAULT, "Set as default viewer");
+    add(help, MF_SEPARATOR, 0, "");
+    add(help, MF_STRING, IDC_BUG, "Report a bug");
+    add(bar, MF_POPUP, file as usize, "File");
+    add(bar, MF_POPUP, view as usize, "View");
+    add(bar, MF_POPUP, help as usize, "Help");
+    let checked = if sort == SORT_NAME { IDM_SORT_NAME } else { IDM_SORT_RECENT };
+    CheckMenuRadioItem(view, IDM_SORT_RECENT as u32, IDM_SORT_NAME as u32, checked as u32, MF_BYCOMMAND);
+    SetMenu(hwnd, bar);
 }
 
 /// Creates the dashboard window and its native child controls.
 unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
-    let icc = INITCOMMONCONTROLSEX { dwSize: mem::size_of::<INITCOMMONCONTROLSEX>() as u32, dwICC: ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES };
+    let icc = INITCOMMONCONTROLSEX { dwSize: mem::size_of::<INITCOMMONCONTROLSEX>() as u32, dwICC: ICC_LISTVIEW_CLASSES };
     InitCommonControlsEx(&icc);
     let dpi = GetDpiForSystem();
     let scale = dpi as f32 / 96.0;
@@ -2180,13 +2082,12 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     let title = wide("GIF Overlay");
     let hwnd = CreateWindowExW(
         0, class.as_ptr(), title.as_ptr(), WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, s(1030.0), s(560.0),
+        CW_USEDEFAULT, CW_USEDEFAULT, s(960.0), s(560.0),
         null_mut(), null_mut(), hinst, null(),
     );
     let child = |class: &str, text: &str, style: u32, id: usize| {
         CreateWindowExW(0, wide(class).as_ptr(), wide(text).as_ptr(), WS_CHILD | style, 0, 0, 0, 0, hwnd, id as HMENU, hinst, null())
     };
-    let sort_box = child("COMBOBOX", "", WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | 0x3 /* CBS_DROPDOWNLIST */, IDC_SORT);
     let search = CreateWindowExW(
         WS_EX_CLIENTEDGE, wide("EDIT").as_ptr(), null(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x80 /* ES_AUTOHSCROLL */,
         0, 0, 0, 0, hwnd, IDC_SEARCH as HMENU, hinst, null(),
@@ -2207,22 +2108,18 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     ncm.cbSize = mem::size_of::<NONCLIENTMETRICSW>() as u32;
     SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, ncm.cbSize, &mut ncm as *mut _ as *mut c_void, 0, dpi);
     let font = CreateFontIndirectW(&ncm.lfMessageFont);
-    for c in [sort_box, search, list, empty] {
+    for c in [search, list, empty] {
         SendMessageW(c, WM_SETFONT, font as usize, 1);
     }
-    let toolbar = create_toolbar(hwnd, hinst, font, scale);
     let sort = json_val(&fs::read_to_string(exe_file("settings.json")).unwrap_or_default(), "DashSort")
         .and_then(|v| v.parse::<u8>().ok())
         .filter(|&v| v == SORT_RECENT || v == SORT_NAME)
         .unwrap_or(SORT_RECENT);
-    for label in ["Sort: Recently opened", "Sort: Name (A\u{2013}Z)"] {
-        SendMessageW(sort_box, CB_ADDSTRING, 0, wide(label).as_ptr() as isize);
-    }
-    SendMessageW(sort_box, CB_SETCURSEL, sort as usize, 0);
+    build_menu(hwnd, sort);
 
     let (tw, th) = (s(144.0) as usize, s(112.0) as usize);
     SendMessageW(list, LVM_SETICONSPACING, 0, ((th as isize + s(60.0) as isize) << 16) | (tw as isize + s(28.0) as isize));
-    *dash() = Dash { hwnd, list, toolbar, sort_box, search, hidden: Vec::new(), sort, empty, scale, tw, th, items: Vec::new(), loading: Vec::new() };
+    *dash() = Dash { hwnd, list, search, hidden: Vec::new(), sort, empty, scale, tw, th, items: Vec::new(), loading: Vec::new() };
     DragAcceptFiles(hwnd, 1);
     layout();
 }
@@ -2290,10 +2187,8 @@ fn main() {
         DASH = Some(Dash {
             hwnd: null_mut(),
             list: null_mut(),
-            toolbar: null_mut(),
             search: null_mut(),
             hidden: Vec::new(),
-            sort_box: null_mut(),
             sort: SORT_RECENT,
             empty: null_mut(),
             scale: 1.0,
