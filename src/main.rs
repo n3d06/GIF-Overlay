@@ -1654,10 +1654,13 @@ const IDC_WIN_BASE: usize = 2000; // + index of an open image, up to WIN_MAX
 const WIN_MAX: usize = 100;
 const IDC_VERSION: usize = 1013;
 const IDM_SORT_RECENT: usize = 1101;
-const IDM_SORT_NAME: usize = 1102;
+const IDM_SORT_LAST: usize = 1105; // the five sort items are IDM_SORT_RECENT + the SORT_* value
 const EMPTY_TEXT: &str = "No history yet\r\nUse File > Add image or drop an image here.";
 const SORT_RECENT: u8 = 0;
 const SORT_NAME: u8 = 1;
+const SORT_NAME_DESC: u8 = 2;
+const SORT_SIZE_DESC: u8 = 3; // largest file first
+const SORT_SIZE_ASC: u8 = 4;
 const IDM_OPEN: usize = 1;
 const IDM_REMOVE: usize = 2;
 const IDM_FOLDER: usize = 3;
@@ -1668,13 +1671,14 @@ const IDM_PASTE: usize = 6;
 struct Thumb {
     path: String,
     name: String,
+    size: u64, // file size in bytes
     px: Vec<u32>, // opaque BGRA, tw*th
 }
 
 struct Dash {
     hwnd: HWND,
     list: HWND,
-    sort: u8, // SORT_RECENT (most recently opened first) or SORT_NAME
+    sort: u8, // one of the SORT_* values (the View menu order)
     empty: HWND,
     scale: f32, // DPI / 96
     tw: usize,  // thumbnail size in pixels
@@ -1733,6 +1737,7 @@ fn make_thumb(path: &str, tw: usize, th: usize) -> Option<Thumb> {
     Some(Thumb {
         path: path.to_string(),
         name: Path::new(path).file_name()?.to_string_lossy().into_owned(),
+        size: fs::metadata(path).map_or(0, |m| m.len()),
         px,
     })
 }
@@ -1748,9 +1753,13 @@ fn refresh_dash() {
             None => make_thumb(&p, d.tw, d.th),
         })
         .collect();
-    if d.sort == SORT_NAME {
-        d.items.sort_by_key(|t| t.name.to_lowercase());
-    } // SORT_RECENT keeps the history order, which is newest first
+    match d.sort {
+        SORT_NAME => d.items.sort_by_key(|t| t.name.to_lowercase()),
+        SORT_NAME_DESC => d.items.sort_by_key(|t| std::cmp::Reverse(t.name.to_lowercase())),
+        SORT_SIZE_DESC => d.items.sort_by_key(|t| std::cmp::Reverse(t.size)),
+        SORT_SIZE_ASC => d.items.sort_by_key(|t| t.size),
+        _ => {} // SORT_RECENT keeps the history order, which is newest first
+    }
     let open: Vec<String> = overlays().iter().map(|&p| unsafe { (*p).path.clone() }).collect();
     let is_open = |t: &Thumb| open.iter().any(|p| p.eq_ignore_ascii_case(&t.path));
     unsafe {
@@ -1969,10 +1978,10 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             }
             0
         }
-        WM_COMMAND if matches!(wp & 0xFFFF, IDM_SORT_RECENT | IDM_SORT_NAME) => {
+        WM_COMMAND if (IDM_SORT_RECENT..=IDM_SORT_LAST).contains(&(wp & 0xFFFF)) => {
             let id = wp & 0xFFFF;
-            dash().sort = if id == IDM_SORT_NAME { SORT_NAME } else { SORT_RECENT };
-            CheckMenuRadioItem(GetSubMenu(GetMenu(hwnd), 1), IDM_SORT_RECENT as u32, IDM_SORT_NAME as u32, id as u32, MF_BYCOMMAND);
+            dash().sort = (id - IDM_SORT_RECENT) as u8;
+            CheckMenuRadioItem(GetSubMenu(GetMenu(hwnd), 1), IDM_SORT_RECENT as u32, IDM_SORT_LAST as u32, id as u32, MF_BYCOMMAND);
             write_settings(saved_opacity()); // remember the choice
             refresh_dash();
             0
@@ -2142,7 +2151,10 @@ unsafe fn build_menu(hwnd: HWND, sort: u8) {
     add(file, MF_SEPARATOR, 0, "");
     add(file, MF_STRING, IDC_QUIT_APP, "Quit GIF Overlay");
     add(view, MF_STRING, IDM_SORT_RECENT, "Sort by recently opened");
-    add(view, MF_STRING, IDM_SORT_NAME, "Sort by name (A\u{2013}Z)");
+    add(view, MF_STRING, IDM_SORT_RECENT + SORT_NAME as usize, "Sort by name (A\u{2013}Z)");
+    add(view, MF_STRING, IDM_SORT_RECENT + SORT_NAME_DESC as usize, "Sort by name (Z\u{2013}A)");
+    add(view, MF_STRING, IDM_SORT_RECENT + SORT_SIZE_DESC as usize, "Sort by size (largest first)");
+    add(view, MF_STRING, IDM_SORT_RECENT + SORT_SIZE_ASC as usize, "Sort by size (smallest first)");
     add(help, MF_STRING, IDC_HELP, "How to use");
     add(help, MF_STRING, IDC_DEFAULT, "Set as default viewer");
     add(help, MF_SEPARATOR, 0, "");
@@ -2154,8 +2166,7 @@ unsafe fn build_menu(hwnd: HWND, sort: u8) {
     add(bar, MF_POPUP, view as usize, "View");
     add(bar, MF_POPUP, CreatePopupMenu() as usize, "Window"); // filled in by WM_INITMENUPOPUP
     add(bar, MF_POPUP, help as usize, "Help");
-    let checked = if sort == SORT_NAME { IDM_SORT_NAME } else { IDM_SORT_RECENT };
-    CheckMenuRadioItem(view, IDM_SORT_RECENT as u32, IDM_SORT_NAME as u32, checked as u32, MF_BYCOMMAND);
+    CheckMenuRadioItem(view, IDM_SORT_RECENT as u32, IDM_SORT_LAST as u32, (IDM_SORT_RECENT + sort as usize) as u32, MF_BYCOMMAND);
     SetMenu(hwnd, bar);
 }
 
@@ -2194,7 +2205,7 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     }
     let sort = json_val(&fs::read_to_string(exe_file("settings.json")).unwrap_or_default(), "DashSort")
         .and_then(|v| v.parse::<u8>().ok())
-        .filter(|&v| v == SORT_RECENT || v == SORT_NAME)
+        .filter(|&v| v <= SORT_SIZE_ASC)
         .unwrap_or(SORT_RECENT);
     build_menu(hwnd, sort);
 
