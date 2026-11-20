@@ -946,7 +946,9 @@ unsafe fn finish_load(l: Loaded) {
                 } else {
                     create_overlay(&l.path, img);
                 }
-                ShowWindow(d.hwnd, SW_HIDE);
+                if IsWindowVisible(d.hwnd) != 0 {
+                    refresh_dash(); // the dashboard stays open: update the "open" marks and the order
+                }
             }
         }
         Err(e) => {
@@ -965,14 +967,16 @@ unsafe fn finish_load(l: Loaded) {
 }
 
 /// Opens `path` in a new window (or brings the window that already shows it to the front).
-/// New images are decoded in the background; `finish_load` records them and hides the dashboard.
+/// New images are decoded in the background; `finish_load` records them; a visible dashboard stays open.
 fn open_gif(path: &str) {
     let path = abs_path(path);
     let existing = overlays().iter().copied().find(|&p| unsafe { (*p).path.eq_ignore_ascii_case(&path) });
     if let Some(p) = existing {
         show_overlay(unsafe { &mut *p });
         history_push(&path);
-        unsafe { ShowWindow(dash().hwnd, SW_HIDE) };
+        if unsafe { IsWindowVisible(dash().hwnd) } != 0 {
+            refresh_dash();
+        }
     } else {
         start_load(&path, null_mut());
     }
