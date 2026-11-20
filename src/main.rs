@@ -1644,6 +1644,11 @@ const IDC_PASTE: usize = 1009;
 const IDC_QUIT_APP: usize = 1010;
 const IDC_FIND: usize = 1011;
 const IDC_UPDATE: usize = 1012;
+const IDC_WIN_MIN: usize = 1020;
+const IDC_WIN_RESTORE: usize = 1021;
+const IDC_WIN_CLOSE: usize = 1022;
+const IDC_WIN_BASE: usize = 2000; // + index of an open image, up to WIN_MAX
+const WIN_MAX: usize = 100;
 const IDC_VERSION: usize = 1013;
 const IDM_SORT_RECENT: usize = 1101;
 const IDM_SORT_NAME: usize = 1102;
@@ -2009,6 +2014,51 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             show_update_result(hwnd, *Box::from_raw(lp as *mut Result<String, String>));
             0
         }
+        // the Window menu (3rd of the bar) lists the open images each time it opens
+        WM_INITMENUPOPUP if lp & 0xFFFF == 2 && (lp >> 16) & 0xFFFF == 0 => {
+            let m = wp as HMENU;
+            while DeleteMenu(m, 0, MF_BYPOSITION) != 0 {}
+            let names: Vec<String> = overlays().iter().take(WIN_MAX).map(|&p| (*p).path.clone()).collect();
+            if names.is_empty() {
+                AppendMenuW(m, MF_STRING | MF_GRAYED, 0, wide("No open images").as_ptr());
+            }
+            for (i, p) in names.iter().enumerate() {
+                let name = Path::new(p).file_name().map_or(p.clone(), |n| n.to_string_lossy().into_owned());
+                AppendMenuW(m, MF_STRING, IDC_WIN_BASE + i, wide(&name.replace('&', "&&")).as_ptr()); // && = a literal &
+            }
+            AppendMenuW(m, MF_SEPARATOR, 0, null());
+            let on = if names.is_empty() { MF_GRAYED } else { 0 };
+            AppendMenuW(m, MF_STRING | on, IDC_WIN_MIN, wide("Minimize all").as_ptr());
+            AppendMenuW(m, MF_STRING | on, IDC_WIN_RESTORE, wide("Restore all").as_ptr());
+            AppendMenuW(m, MF_STRING | on, IDC_WIN_CLOSE, wide("Close all windows").as_ptr());
+            0
+        }
+        WM_COMMAND if (IDC_WIN_BASE..IDC_WIN_BASE + WIN_MAX).contains(&(wp & 0xFFFF)) => {
+            if let Some(&p) = overlays().get((wp & 0xFFFF) - IDC_WIN_BASE) {
+                show_overlay(&mut *p);
+            }
+            0
+        }
+        WM_COMMAND if wp & 0xFFFF == IDC_WIN_MIN => {
+            for p in overlays().clone() {
+                minimize(&mut *p);
+            }
+            0
+        }
+        WM_COMMAND if wp & 0xFFFF == IDC_WIN_RESTORE => {
+            for p in overlays().clone() {
+                show_overlay(&mut *p);
+            }
+            0
+        }
+        WM_COMMAND if wp & 0xFFFF == IDC_WIN_CLOSE => {
+            // destroying a window edits `overlays()`, so collect the handles first
+            let all: Vec<usize> = overlays().iter().map(|&p| (*p).hwnd as usize).collect();
+            for h in all {
+                DestroyWindow(h as HWND);
+            }
+            0
+        }
         WM_COMMAND if wp & 0xFFFF == IDC_FIND => {
             SetFocus(dash().search);
             0
@@ -2138,6 +2188,7 @@ unsafe fn build_menu(hwnd: HWND, sort: u8) {
     add(help, MF_STRING | MF_GRAYED, IDC_VERSION, &format!("Version {VERSION}"));
     add(bar, MF_POPUP, file as usize, "File");
     add(bar, MF_POPUP, view as usize, "View");
+    add(bar, MF_POPUP, CreatePopupMenu() as usize, "Window"); // filled in by WM_INITMENUPOPUP
     add(bar, MF_POPUP, help as usize, "Help");
     let checked = if sort == SORT_NAME { IDM_SORT_NAME } else { IDM_SORT_RECENT };
     CheckMenuRadioItem(view, IDM_SORT_RECENT as u32, IDM_SORT_NAME as u32, checked as u32, MF_BYCOMMAND);
