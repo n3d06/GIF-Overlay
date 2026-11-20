@@ -1850,9 +1850,9 @@ fn remove_item(i: usize) {
     refresh_dash();
 }
 
-/// Height of the command strip at the top of the dashboard (like a toolbar).
+/// Height of the search row above the list.
 fn bar_height(d: &Dash) -> i32 {
-    (44.0 * d.scale) as i32
+    (34.0 * d.scale) as i32
 }
 
 fn layout() {
@@ -1868,13 +1868,11 @@ fn layout() {
     };
     let bar = bar_height(d).min(h);
     let list_h = h - bar;
-    let y = (bar - s(32.0)) / 2;
     unsafe {
-        // a combo box's height includes its drop-down list
-        MoveWindow(d.search, s(12.0), y + s(4.0), s(260.0), s(24.0), 1);
+        MoveWindow(d.search, s(12.0), (bar - s(20.0)) / 2, (w - s(24.0)).max(0), s(20.0), 1);
         MoveWindow(d.list, 0, bar, w, list_h, 1);
         MoveWindow(d.empty, 0, bar + list_h / 2 - s(24.0), w, s(48.0), 1);
-        InvalidateRect(d.hwnd, null(), 1); // the strip moved
+        InvalidateRect(d.hwnd, null(), 1); // the search row moved
     }
 }
 
@@ -1948,14 +1946,12 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             SetFocus(dash().list);
             0
         }
-        // the top strip uses the dialog button-face color with a thin bottom edge, like a native toolbar
-        WM_ERASEBKGND => {
+                WM_ERASEBKGND => {
             let mut r: RECT = mem::zeroed();
             GetClientRect(hwnd, &mut r);
             FillRect(wp as HDC, &r, GetSysColorBrush(COLOR_WINDOW));
             r.bottom = bar_height(dash());
-            FillRect(wp as HDC, &r, GetSysColorBrush(COLOR_BTNFACE));
-            r.top = r.bottom - 1;
+            r.top = r.bottom - 1; // thin line under the search row
             FillRect(wp as HDC, &r, GetSysColorBrush(COLOR_3DLIGHT));
             1
         }
@@ -2216,7 +2212,7 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
         CreateWindowExW(0, wide(class).as_ptr(), wide(text).as_ptr(), WS_CHILD | style, 0, 0, 0, 0, hwnd, id as HMENU, hinst, null())
     };
     let search = CreateWindowExW(
-        WS_EX_CLIENTEDGE, wide("EDIT").as_ptr(), null(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x80 /* ES_AUTOHSCROLL */,
+        0, wide("EDIT").as_ptr(), null(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x80 /* ES_AUTOHSCROLL */,
         0, 0, 0, 0, hwnd, IDC_SEARCH as HMENU, hinst, null(),
     );
     SendMessageW(search, 0x1501 /* EM_SETCUEBANNER */, 1, wide("Search...  (Ctrl+F)").as_ptr() as isize);
