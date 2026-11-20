@@ -20,7 +20,7 @@ use windows_sys::Win32::{
     UI::{
         Controls::{Dialogs::*, *}, HiDpi::*,
         Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, 
-            EnableWindow, GetFocus, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_SPACE, VK_UP,
+            GetFocus, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_SPACE, VK_UP,
         },
         Shell::*,
         WindowsAndMessaging::*,
@@ -1602,11 +1602,7 @@ struct Thumb {
 struct Dash {
     hwnd: HWND,
     list: HWND,
-    add: HWND,
-    default_btn: HWND,
-    clear_btn: HWND,
-    help_btn: HWND,
-    bug_btn: HWND,
+    toolbar: HWND,
     search: HWND,
     hidden: Vec<Thumb>, // thumbnails the search filter hides (kept so clearing it is instant)
     sort_box: HWND,
@@ -1725,7 +1721,7 @@ fn refresh_dash() {
         let filtered = d.items.is_empty() && !d.hidden.is_empty();
         SetWindowTextW(d.empty, wide(if filtered { "No matching images" } else { EMPTY_TEXT }).as_ptr());
         ShowWindow(d.empty, if d.items.is_empty() { SW_SHOW } else { SW_HIDE });
-        EnableWindow(d.clear_btn, (!d.items.is_empty() || !d.hidden.is_empty()) as i32);
+        SendMessageW(d.toolbar, TB_ENABLEBUTTON, IDC_CLEAR, (!d.items.is_empty() || !d.hidden.is_empty()) as isize);
     }
 }
 
@@ -1802,11 +1798,7 @@ fn layout() {
     let list_h = h - bar;
     let y = (bar - s(32.0)) / 2;
     unsafe {
-        MoveWindow(d.add, s(12.0), y, s(108.0), s(32.0), 1);
-        MoveWindow(d.clear_btn, s(126.0), y, s(116.0), s(32.0), 1);
-        MoveWindow(d.default_btn, s(248.0), y, s(176.0), s(32.0), 1);
-        MoveWindow(d.help_btn, s(430.0), y, s(104.0), s(32.0), 1);
-        MoveWindow(d.bug_btn, s(540.0), y, s(116.0), s(32.0), 1);
+        MoveWindow(d.toolbar, s(8.0), y, w - s(8.0 + 8.0 + 12.0 + 160.0 + 8.0 + 160.0), s(32.0), 1);
         // a combo box's height includes its drop-down list
         MoveWindow(d.sort_box, w - s(12.0 + 160.0), y + s(4.0), s(160.0), s(160.0), 1);
         MoveWindow(d.search, w - s(12.0 + 160.0 + 8.0 + 160.0), y + s(4.0), s(160.0), s(24.0), 1);
@@ -1962,7 +1954,15 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         }
         WM_NOTIFY => {
             let nm = &*(lp as *const NMHDR);
-            if nm.hwndFrom == dash().list {
+            if nm.hwndFrom == dash().toolbar && nm.code == TBN_GETINFOTIPW {
+                let tip = &mut *(lp as *mut NMTBGETINFOTIPW);
+                let text = TOOLBAR.iter().find(|b| b.0 as i32 == tip.iItem).map_or("", |b| b.3);
+                let n = text.encode_utf16().count().min(tip.cchTextMax.max(1) as usize - 1);
+                for (i, c) in text.encode_utf16().take(n).enumerate() {
+                    *tip.pszText.add(i) = c;
+                }
+                *tip.pszText.add(n) = 0;
+            } else if nm.hwndFrom == dash().list {
                 if nm.code == LVN_ITEMACTIVATE {
                     open_item((*(lp as *const NMITEMACTIVATE)).iItem as usize);
                 } else if nm.code == LVN_KEYDOWN {
@@ -2109,27 +2109,70 @@ unsafe fn glyph_bitmap(glyph: u16, size: i32, color: u32) -> Option<HBITMAP> {
     result
 }
 
-/// Puts an icon to the left of the text of each (button, glyph) pair.
-unsafe fn set_button_icons(buttons: &[(HWND, u16)], scale: f32) {
+/// Dashboard toolbar: (command id, icon glyph, label, tooltip).
+const TOOLBAR: [(usize, u16, &str, &str); 5] = [
+    (IDC_ADD, 0xE710, "Add image", "Add an image from a file (you can also drop or paste one)"),
+    (IDC_CLEAR, 0xE74D, "Clear history", "Empty the history list (your image files are not deleted)"),
+    (IDC_DEFAULT, 0xE713, "Set as default viewer", "Choose GIF Overlay as the default app for GIF files"),
+    (IDC_HELP, 0xE897, "How to use", "Tips and keyboard shortcuts"),
+    (IDC_BUG, 0xEBE8, "Report a bug", "Open the issue page on GitHub"),
+];
+
+/// Native toolbar with an icon and a label per button; tooltips come from `TBN_GETINFOTIPW`.
+/// Clicks arrive as WM_COMMAND with the button's id.
+unsafe fn create_toolbar(parent: HWND, hinst: HINSTANCE, font: HFONT, scale: f32) -> HWND {
+    let tb = CreateWindowExW(
+        0, wide("ToolbarWindow32").as_ptr(), null(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBSTYLE_FLAT | TBSTYLE_LIST | TBSTYLE_TOOLTIPS | TBSTYLE_TRANSPARENT | CCS_NODIVIDER as u32 | CCS_NORESIZE as u32,
+        0, 0, 0, 0, parent, null_mut(), hinst, null(),
+    );
+    SetWindowTheme(tb, wide("Explorer").as_ptr(), null());
+    SendMessageW(tb, WM_SETFONT, font as usize, 1);
+    SendMessageW(tb, TB_BUTTONSTRUCTSIZE, mem::size_of::<TBBUTTON>(), 0);
+    SendMessageW(tb, TB_SETPADDING, 0, (((8.0 * scale) as isize) << 16) | (16.0 * scale) as isize);
+    // icons come from the Segoe icon font; without it the buttons just show their labels
     let size = (16.0 * scale).round() as i32;
     let color = GetSysColor(COLOR_BTNTEXT);
-    for &(btn, glyph) in buttons {
-        let Some(bmp) = glyph_bitmap(glyph, size, color) else { return };
-        let himl = ImageList_Create(size, size, ILC_COLOR32, 1, 0);
-        ImageList_Add(himl, bmp, null_mut());
-        DeleteObject(bmp);
-        let bil = BUTTON_IMAGELIST {
-            himl,
-            margin: RECT { left: (8.0 * scale) as i32, top: 0, right: 0, bottom: 0 },
-            uAlign: BUTTON_IMAGELIST_ALIGN_LEFT,
-        };
-        SendMessageW(btn, BCM_SETIMAGELIST, 0, &bil as *const _ as isize);
+    let himl = ImageList_Create(size, size, ILC_COLOR32, TOOLBAR.len() as i32, 0);
+    let mut icons = true;
+    for b in &TOOLBAR {
+        match glyph_bitmap(b.1, size, color) {
+            Some(bmp) => {
+                ImageList_Add(himl, bmp, null_mut());
+                DeleteObject(bmp);
+            }
+            None => {
+                icons = false;
+                break;
+            }
+        }
     }
+    if icons {
+        SendMessageW(tb, TB_SETIMAGELIST, 0, himl as isize);
+    } else {
+        ImageList_Destroy(himl);
+    }
+    let labels: Vec<Vec<u16>> = TOOLBAR.iter().map(|b| wide(b.2)).collect();
+    let buttons: Vec<TBBUTTON> = TOOLBAR
+        .iter()
+        .enumerate()
+        .map(|(i, b)| TBBUTTON {
+            iBitmap: if icons { i as i32 } else { I_IMAGENONE },
+            idCommand: b.0 as i32,
+            fsState: TBSTATE_ENABLED as u8,
+            fsStyle: (BTNS_BUTTON | BTNS_AUTOSIZE) as u8,
+            bReserved: [0; 6],
+            dwData: 0,
+            iString: labels[i].as_ptr() as isize,
+        })
+        .collect();
+    SendMessageW(tb, TB_ADDBUTTONSW, buttons.len(), buttons.as_ptr() as isize);
+    tb
 }
 
 /// Creates the dashboard window and its native child controls.
 unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
-    let icc = INITCOMMONCONTROLSEX { dwSize: mem::size_of::<INITCOMMONCONTROLSEX>() as u32, dwICC: ICC_LISTVIEW_CLASSES };
+    let icc = INITCOMMONCONTROLSEX { dwSize: mem::size_of::<INITCOMMONCONTROLSEX>() as u32, dwICC: ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES };
     InitCommonControlsEx(&icc);
     let dpi = GetDpiForSystem();
     let scale = dpi as f32 / 96.0;
@@ -2143,11 +2186,6 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     let child = |class: &str, text: &str, style: u32, id: usize| {
         CreateWindowExW(0, wide(class).as_ptr(), wide(text).as_ptr(), WS_CHILD | style, 0, 0, 0, 0, hwnd, id as HMENU, hinst, null())
     };
-    let add = child("BUTTON", "Add image", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_ADD);
-    let default_btn = child("BUTTON", "Set as default viewer", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_DEFAULT);
-    let clear_btn = child("BUTTON", "Clear history", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_CLEAR);
-    let help_btn = child("BUTTON", "How to use", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_HELP);
-    let bug_btn = child("BUTTON", "Report a bug", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_BUG);
     let sort_box = child("COMBOBOX", "", WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | 0x3 /* CBS_DROPDOWNLIST */, IDC_SORT);
     let search = CreateWindowExW(
         WS_EX_CLIENTEDGE, wide("EDIT").as_ptr(), null(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x80 /* ES_AUTOHSCROLL */,
@@ -2169,11 +2207,10 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     ncm.cbSize = mem::size_of::<NONCLIENTMETRICSW>() as u32;
     SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, ncm.cbSize, &mut ncm as *mut _ as *mut c_void, 0, dpi);
     let font = CreateFontIndirectW(&ncm.lfMessageFont);
-    for c in [add, default_btn, clear_btn, help_btn, bug_btn, sort_box, search, list, empty] {
+    for c in [sort_box, search, list, empty] {
         SendMessageW(c, WM_SETFONT, font as usize, 1);
     }
-    // icons: add, settings, trash, help (Segoe Fluent Icons / MDL2 Assets code points)
-    set_button_icons(&[(add, 0xE710), (default_btn, 0xE713), (clear_btn, 0xE74D), (help_btn, 0xE897), (bug_btn, 0xEBE8)], scale);
+    let toolbar = create_toolbar(hwnd, hinst, font, scale);
     let sort = json_val(&fs::read_to_string(exe_file("settings.json")).unwrap_or_default(), "DashSort")
         .and_then(|v| v.parse::<u8>().ok())
         .filter(|&v| v == SORT_RECENT || v == SORT_NAME)
@@ -2185,7 +2222,7 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
 
     let (tw, th) = (s(144.0) as usize, s(112.0) as usize);
     SendMessageW(list, LVM_SETICONSPACING, 0, ((th as isize + s(60.0) as isize) << 16) | (tw as isize + s(28.0) as isize));
-    *dash() = Dash { hwnd, list, add, default_btn, clear_btn, help_btn, bug_btn, sort_box, search, hidden: Vec::new(), sort, empty, scale, tw, th, items: Vec::new(), loading: Vec::new() };
+    *dash() = Dash { hwnd, list, toolbar, sort_box, search, hidden: Vec::new(), sort, empty, scale, tw, th, items: Vec::new(), loading: Vec::new() };
     DragAcceptFiles(hwnd, 1);
     layout();
 }
@@ -2253,11 +2290,7 @@ fn main() {
         DASH = Some(Dash {
             hwnd: null_mut(),
             list: null_mut(),
-            add: null_mut(),
-            default_btn: null_mut(),
-            clear_btn: null_mut(),
-            help_btn: null_mut(),
-            bug_btn: null_mut(),
+            toolbar: null_mut(),
             search: null_mut(),
             hidden: Vec::new(),
             sort_box: null_mut(),
