@@ -1,9 +1,6 @@
 name: CI/CD Pipeline
 
 on:
-  push:
-    branches: [main]
-    paths-ignore: ['web/**', '**/*.md', 'LICENSE']
   pull_request:
     paths-ignore: ['web/**', '**/*.md', 'LICENSE']
   # Run manually on main to cut a release: tag -> build -> installer -> GitHub Release -> WinGet
@@ -17,7 +14,7 @@ permissions:
   contents: read
 
 jobs:
-  # 1. Make sure it builds (every push / PR / manual run)
+  # 1. Make sure it builds (every PR / manual run)
   build-check:
     runs-on: windows-latest
     steps:
