@@ -1769,7 +1769,7 @@ fn remove_item(i: usize) {
     refresh_dash();
 }
 
-/// Height of the command strip at the bottom of the dashboard (like the button row of a Windows dialog).
+/// Height of the command strip at the top of the dashboard (like a toolbar).
 fn bar_height(d: &Dash) -> i32 {
     (52.0 * d.scale) as i32
 }
@@ -1785,8 +1785,9 @@ fn layout() {
         unsafe { GetClientRect(d.hwnd, &mut r) };
         (r.right, r.bottom)
     };
-    let (bar, top) = (bar_height(d), (h - bar_height(d)).max(0));
-    let y = top + (bar - s(32.0)) / 2;
+    let bar = bar_height(d).min(h);
+    let list_h = h - bar;
+    let y = (bar - s(32.0)) / 2;
     unsafe {
         MoveWindow(d.add, s(12.0), y, s(124.0), s(32.0), 1);
         MoveWindow(d.clear_btn, s(144.0), y, s(124.0), s(32.0), 1);
@@ -1795,8 +1796,8 @@ fn layout() {
         MoveWindow(d.bug_btn, s(600.0), y, s(124.0), s(32.0), 1);
         // a combo box's height includes its drop-down list
         MoveWindow(d.sort_box, w - s(12.0 + 170.0), y + s(4.0), s(170.0), s(160.0), 1);
-        MoveWindow(d.list, 0, 0, w, top, 1);
-        MoveWindow(d.empty, 0, top / 2 - s(24.0), w, s(48.0), 1);
+        MoveWindow(d.list, 0, bar, w, list_h, 1);
+        MoveWindow(d.empty, 0, bar + list_h / 2 - s(24.0), w, s(48.0), 1);
         InvalidateRect(d.hwnd, null(), 1); // the strip moved
     }
 }
@@ -1871,14 +1872,14 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             SetFocus(dash().list);
             0
         }
-        // the bottom strip uses the dialog button-face color with a thin top edge, like a native dialog footer
+        // the top strip uses the dialog button-face color with a thin bottom edge, like a native toolbar
         WM_ERASEBKGND => {
             let mut r: RECT = mem::zeroed();
             GetClientRect(hwnd, &mut r);
             FillRect(wp as HDC, &r, GetSysColorBrush(COLOR_WINDOW));
-            r.top = r.bottom - bar_height(dash());
+            r.bottom = bar_height(dash());
             FillRect(wp as HDC, &r, GetSysColorBrush(COLOR_BTNFACE));
-            r.bottom = r.top + 1;
+            r.top = r.bottom - 1;
             FillRect(wp as HDC, &r, GetSysColorBrush(COLOR_3DLIGHT));
             1
         }
