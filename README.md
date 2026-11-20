@@ -16,7 +16,7 @@
     - A File / View / Window / Help menu bar holds Add image, Paste, Clear history, Sort, the list of open images (with Minimize all, Restore all, Close all windows), How to use, Set as default viewer and Report a bug.
     - Help shows the current version and `Check for updates` compares it with the latest GitHub release (only when you click it; nothing is sent automatically).
     - Images that already have a window are marked with a green dot and "(open)"; opening one again brings its window to the front instead of duplicating it.
-    - Sort by recently opened or by name (A–Z); the choice is remembered.
+    - View menu: sort by recently opened, name (A–Z or Z–A) or file size (largest or smallest first); the choice is remembered.
     - `Clear history` empties the list after a confirmation (your image files are never touched).
 - **Paste & Open from a link:** `Ctrl+V` opens a screenshot, a copied file or an `http(s)` image link from the clipboard in a new window. Pasted images are kept in a `pasted` folder next to the exe for as long as they are in the history.
 - **Animated formats:** GIF, animated WebP and APNG play with their own frame timing; AVIF opens as a still image when the Windows AV1/AVIF codec is installed.
