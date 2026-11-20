@@ -38,5 +38,5 @@ winresource = "0.1"
 opt-level = "z"
 lto = true
 codegen-units = 1
-panic = "abort"
+panic = "unwind"
 strip = true
