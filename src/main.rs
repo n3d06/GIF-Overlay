@@ -1583,8 +1583,7 @@ const IDC_BUG: usize = 1007;
 const ISSUES_URL: &str = "https://github.com/n3d06/GIF-Overlay/issues";
 const IDC_SORT: usize = 1005;
 const IDC_SEARCH: usize = 1008;
-const EMPTY_TEXT: &str = "No history yet
-Click \"Add image{2026}\" or drop an image here.";
+const EMPTY_TEXT: &str = "No history yet\r\nClick \"Add image\" or drop an image here.";
 const SORT_RECENT: u8 = 0;
 const SORT_NAME: u8 = 1;
 const IDM_OPEN: usize = 1;
@@ -1851,7 +1850,7 @@ fn context_menu_dash(hwnd: HWND, lp: LPARAM) {
             add(MF_STRING, IDM_REMOVE, "Remove from history");
             SetMenuDefaultItem(menu, IDM_OPEN as u32, 0); // double-click action in bold
         } else {
-            add(MF_STRING, IDM_ADD, "Add image...");
+            add(MF_STRING, IDM_ADD, "Add image");
             add(MF_STRING, IDM_PASTE, "Paste image or link\tCtrl+V");
         }
         let id = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, null());
@@ -1909,7 +1908,7 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         }
         WM_COMMAND if wp & 0xFFFF == IDC_HELP => {
             let text = "OPEN AN IMAGE\n\
-                \u{2022} Click \"Add image...\", drop a file here, or double-click a thumbnail.\n\
+                \u{2022} Click \"Add image\", drop a file here, or double-click a thumbnail.\n\
                 \u{2022} Ctrl+V pastes a screenshot, a copied file, or an image link (http / https).\n\
                 \u{2022} Right-click a thumbnail: Open, Show in folder, Copy path (Ctrl+C), Remove (Delete).\n\
                 \u{2022} Right-click an empty spot for Add image and Paste.\n\
@@ -2144,7 +2143,7 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     let child = |class: &str, text: &str, style: u32, id: usize| {
         CreateWindowExW(0, wide(class).as_ptr(), wide(text).as_ptr(), WS_CHILD | style, 0, 0, 0, 0, hwnd, id as HMENU, hinst, null())
     };
-    let add = child("BUTTON", "Add image\u{2026}", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_ADD);
+    let add = child("BUTTON", "Add image", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_ADD);
     let default_btn = child("BUTTON", "Set as default viewer", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_DEFAULT);
     let clear_btn = child("BUTTON", "Clear history", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_CLEAR);
     let help_btn = child("BUTTON", "How to use", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, IDC_HELP);
