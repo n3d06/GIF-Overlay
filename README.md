@@ -48,13 +48,16 @@ winget install gifoverlay
 - **Move:** Left-click and drag the image (ensure window is unlocked).
 - **Resize:** Hover the image to show the handles. Drag the corner to scale (keeps the aspect ratio), the right edge to change only the width, the bottom edge to change only the height. `Ctrl + Mouse Wheel` and the presets in Settings also work.
 - **Context Menu (Right-Click):**
-    - **Lock Window:** Prevent accidental moving or resizing.
-    - **Open another image...:** Show the history dashboard to open a second (or third...) image in its own window. Every window has its own size, opacity, transforms and lock.
-    - **Settings:** Scale presets, Opacity and Transform (Rotate, Flip).
-    - **Pause / Play:** Toggle GIF animation.
-    - **Reset to Default:** Restore original size and transforms.
-    - **Replace this image...:** Swap the image in this window for another GIF, PNG, JPG, BMP, TIFF or WebP file.
-    - **Close:** Close this window. Closing the last one returns to the dashboard; close the dashboard window to quit.
+    - **Lock Window:** Prevent accidental moving or resizing (click-through; Ctrl+click to unlock).
+    - **Dashboard:** Show the history dashboard to open a second (or third...) image in its own window. Every window has its own size, opacity, transforms and lock.
+    - **Replace this image...:** Swap the image in this window for another GIF, PNG, JPG, BMP, TIFF, WebP, APNG or AVIF file.
+    - **Paste image or link (Ctrl+V)**, **Copy image (Ctrl+C)** and **Show in folder.**
+    - **Settings:** Scale presets, Opacity, Transform (Rotate, Flip) and Reset to Default.
+    - **Always on Top**, **Pause / Play (Space)** (only for animations).
+    - **Close window (Esc):** Close this window. Closing the last one quits unless the dashboard is showing.
+    - **Quit GIF Overlay:** Close every window.
+- **Keys:** `Esc` close, `Space` pause, `Up` / `Down` opacity, `Ctrl+C` copy the image, `Ctrl+V` paste.
+- **Dashboard right-click:** on a thumbnail - Open, Show in folder, Copy path, Remove; on empty space - Add image, Paste.
 
 ## 🛠 Development
 
