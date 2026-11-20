@@ -5,6 +5,11 @@ on:
     paths-ignore: ['web/**', '**/*.md', 'LICENSE']
   # Run manually on main to cut a release: tag -> build -> installer -> GitHub Release -> WinGet
   workflow_dispatch:
+    inputs:
+      release_notes:
+        description: 'Release notes in Markdown, shown above the generated changelog'
+        required: false
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -105,6 +110,7 @@ jobs:
         with:
           tag_name: ${{ needs.create-tag.outputs.new_tag }}
           name: Release ${{ needs.create-tag.outputs.new_tag }}
+          body: ${{ inputs.release_notes }}
           generate_release_notes: true
           files: |
             dist/GIF-Overlay-Portable.zip
