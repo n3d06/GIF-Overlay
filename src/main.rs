@@ -102,6 +102,7 @@ fn write_settings(opacity: u32) {
 
 fn save_settings(a: &App) {
     write_settings(a.opacity);
+    save_session();
 }
 
 // ---------- history (history.txt, one path per line, newest first) ----------
@@ -672,8 +673,76 @@ fn saved_opacity() -> u32 {
         .map_or(100, |o| (o * 100.0).round().clamp(10.0, 100.0) as u32)
 }
 
-/// Opens an already decoded image in a new overlay window.
-fn create_overlay(path: &str, d: Decoded) {
+// ---------- session (session.txt): the open windows, reopened at the next start ----------
+
+/// What is remembered about one window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Saved {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    opacity: u32,
+    locked: bool,
+    rot: u8,
+    flip_h: bool,
+    flip_v: bool,
+}
+
+/// One line per window: x, y, w, h, opacity, locked, rotation, flip h, flip v, then the path (last, so it may hold tabs).
+fn session_line(path: &str, s: &Saved) -> String {
+    format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", s.x, s.y, s.w, s.h, s.opacity, s.locked as u8, s.rot, s.flip_h as u8, s.flip_v as u8, path)
+}
+
+/// Lines that do not parse are skipped, so a damaged file loses only that window.
+fn parse_session(text: &str) -> Vec<(String, Saved)> {
+    text.lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.trim_start_matches('\u{feff}').splitn(10, '\t').collect();
+            let n = |i: usize| f.get(i)?.parse::<i32>().ok();
+            let s = Saved {
+                x: n(0)?,
+                y: n(1)?,
+                w: n(2)?,
+                h: n(3)?,
+                opacity: n(4)?.clamp(10, 100) as u32,
+                locked: n(5)? != 0,
+                rot: (n(6)?.rem_euclid(4)) as u8,
+                flip_h: n(7)? != 0,
+                flip_v: n(8)? != 0,
+            };
+            Some((f.get(9).filter(|p| !p.is_empty())?.to_string(), s))
+        })
+        .collect()
+}
+
+/// Writes the open windows. Skipped while images are still loading (at startup the other windows
+/// of the last session are on their way and would be forgotten).
+fn save_session() {
+    if dash().loading.is_empty() {
+        let lines: Vec<String> = overlays().iter().map(|&p| unsafe { window_state(&*p) }).collect();
+        write_atomic("session.txt", lines.join("\n").as_bytes());
+    }
+}
+
+unsafe fn window_state(a: &App) -> String {
+    let mut r: RECT = mem::zeroed();
+    GetWindowRect(a.hwnd, &mut r);
+    if IsIconic(a.hwnd) != 0 {
+        // a minimized window sits off screen: its restored place is in the window placement
+        let mut wp: WINDOWPLACEMENT = mem::zeroed();
+        wp.length = mem::size_of::<WINDOWPLACEMENT>() as u32;
+        GetWindowPlacement(a.hwnd, &mut wp);
+        r = wp.rcNormalPosition;
+    }
+    // maximized: remember the size and place the window had before
+    let (x, y, w, h) = a.restore.unwrap_or((r.left, r.top, a.w, a.h));
+    let s = Saved { x, y, w, h, opacity: a.opacity, locked: a.locked, rot: a.rot, flip_h: a.flip_h, flip_v: a.flip_v };
+    session_line(&a.path, &s)
+}
+
+/// Opens an already decoded image in a new overlay window; `state` puts it back as it was.
+fn create_overlay(path: &str, d: Decoded, state: Option<&Saved>) {
     let opacity = saved_opacity();
     unsafe {
         let a = Box::into_raw(Box::new(App {
@@ -710,10 +779,29 @@ fn create_overlay(path: &str, d: Decoded) {
         overlays().push(a);
         DragAcceptFiles(hwnd, 1);
         apply(&mut *a, path, d);
+        let mut placed = false;
+        if let Some(s) = state {
+            let m = screen_rect(hwnd);
+            if s.w >= 50 && s.h >= 50 && s.w <= (m.right - m.left) * 3 && s.h <= (m.bottom - m.top) * 3 {
+                let app = &mut *a;
+                (app.opacity, app.locked, app.rot, app.flip_h, app.flip_v, app.w, app.h) = (s.opacity, s.locked, s.rot, s.flip_h, s.flip_v, s.w, s.h);
+                // only trust the position if its middle is still on a monitor (it may have been unplugged)
+                let mid = POINT { x: s.x + s.w / 2, y: s.y + s.h / 2 };
+                if !MonitorFromPoint(mid, MONITOR_DEFAULTTONULL).is_null() {
+                    SetWindowPos(hwnd, null_mut(), s.x, s.y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                    placed = true;
+                }
+                render(app);
+            }
+        }
         apply_lock(&*a);
-        center(&*a, offset);
+        if !placed {
+            center(&*a, offset);
+        }
         ShowWindow(hwnd, SW_SHOW);
-        SetForegroundWindow(hwnd);
+        if state.is_none() {
+            SetForegroundWindow(hwnd); // a restored window must not steal focus from what the user is doing
+        }
     }
 }
 
@@ -756,6 +844,7 @@ struct Loaded {
     path: String,
     target: usize, // overlay window to put the image in (0 = open a new window)
     res: Result<Decoded, String>,
+    state: Option<Saved>, // set when the window is being restored from the last session
 }
 
 fn set_title(hwnd: HWND, path: &str) {
@@ -765,6 +854,10 @@ fn set_title(hwnd: HWND, path: &str) {
 
 /// Decodes on a worker thread so a big GIF cannot freeze the UI; `finish_load` runs when it is done.
 fn start_load(path: &str, target: HWND) {
+    start_load_with(path, target, None);
+}
+
+fn start_load_with(path: &str, target: HWND, state: Option<Saved>) {
     let path = abs_path(path);
     let d = dash();
     if d.loading.iter().any(|p| p.eq_ignore_ascii_case(&path)) {
@@ -787,7 +880,7 @@ fn start_load(path: &str, target: HWND) {
         if com {
             unsafe { CoUninitialize() };
         }
-        let msg = Box::into_raw(Box::new(Loaded { path, target, res }));
+        let msg = Box::into_raw(Box::new(Loaded { path, target, res, state }));
         if unsafe { PostMessageW(dash_hwnd as HWND, WM_LOADED, 0, msg as isize) } == 0 {
             drop(unsafe { Box::from_raw(msg) }); // dashboard already gone: the app is quitting
         }
@@ -804,7 +897,9 @@ unsafe fn finish_load(l: Loaded) {
     let target = overlays().iter().copied().find(|&p| l.target != 0 && (*p).hwnd as usize == l.target);
     match l.res {
         Ok(img) => {
-            history_push(&l.path);
+            if l.state.is_none() {
+                history_push(&l.path); // restoring a session must not reshuffle the history
+            }
             if l.target != 0 {
                 if let Some(p) = target {
                     apply(&mut *p, &l.path, img);
@@ -816,7 +911,7 @@ unsafe fn finish_load(l: Loaded) {
                 if let Some(p) = overlays().iter().copied().find(|&p| (*p).path.eq_ignore_ascii_case(&l.path)) {
                     show_overlay(&mut *p);
                 } else {
-                    create_overlay(&l.path, img);
+                    create_overlay(&l.path, img, l.state.as_ref());
                 }
                 if IsWindowVisible(d.hwnd) != 0 {
                     refresh_dash(); // the dashboard stays open: update the "open" marks and the order
@@ -827,15 +922,18 @@ unsafe fn finish_load(l: Loaded) {
             if let Some(p) = target {
                 set_title((*p).hwnd, &(*p).path); // undo "Loading..."
             }
-            show_error(&format!("Failed to load image: {e}"));
-            history_remove(&l.path);
-            if overlays().is_empty() {
+            if l.state.is_none() {
+                show_error(&format!("Failed to load image: {e}")); // a file of the last session that no longer opens is skipped quietly
+                history_remove(&l.path);
+            }
+            if overlays().is_empty() && d.loading.is_empty() {
                 show_dash(); // never leave the app without a window
             } else if IsWindowVisible(d.hwnd) != 0 {
                 refresh_dash();
             }
         }
     }
+    save_session();
 }
 
 /// Opens `path` in a new window (or brings the window that already shows it to the front).
@@ -1154,6 +1252,7 @@ fn command(a: &mut App, id: usize) {
             a.locked = !a.locked;
             apply_lock(a);
             render(a); // show / hide the handles and the X right away
+            schedule_save(a);
         }
         ID_OPEN => {
             if let Some(p) = open_dialog(a.hwnd, false).first() {
@@ -1380,6 +1479,10 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             }
             0
         }
+        WM_EXITSIZEMOVE => {
+            schedule_save(a); // the window was dragged to a new place
+            0
+        }
         WM_CAPTURECHANGED => {
             a.drag = None;
             0
@@ -1468,6 +1571,7 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             let p = a as *mut App;
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             overlays().retain(|&q| q != p);
+            save_session();
             drop(Box::from_raw(p));
             // closing the last image quits, unless the dashboard was opened on purpose and is still showing
             let dash_visible = IsWindowVisible(dash().hwnd) != 0;
@@ -1981,6 +2085,7 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             0
         }
         WM_COMMAND if wp & 0xFFFF == IDC_QUIT_APP => {
+            save_session();
             PostQuitMessage(0);
             0
         }
@@ -2245,9 +2350,16 @@ fn main() {
         create_dash(hinst, &dc);
 
         // "Open With" / command line goes straight to an overlay; a bare launch shows the history.
+        // The windows that were open when the app last quit come back first.
+        let last = parse_session(&fs::read_to_string(exe_file("session.txt")).unwrap_or_default());
+        let last: Vec<_> = last.into_iter().filter(|(p, _)| fs::metadata(p).is_ok()).take(WIN_MAX).collect();
+        for (p, s) in &last {
+            start_load_with(p, null_mut(), Some(*s));
+        }
         match std::env::args().nth(1).filter(|p| fs::metadata(p).is_ok()) {
             Some(p) => open_gif(&p),
-            None => show_dash(),
+            None if last.is_empty() => show_dash(),
+            None => {} // the restored windows are the app's windows; the dashboard is one click away
         }
 
         let mut msg: MSG = mem::zeroed();
@@ -2305,6 +2417,16 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn session_round_trip() {
+        let s = Saved { x: -1200, y: 40, w: 640, h: 360, opacity: 70, locked: true, rot: 3, flip_h: false, flip_v: true };
+        let text = format!("{}\nbroken line\n{}\n", session_line("C:\\a\tb\\x.gif", &s), session_line("D:\\y.png", &Saved { rot: 0, ..s }));
+        let got = parse_session(&text);
+        assert_eq!(got.len(), 2, "the damaged line is skipped");
+        assert_eq!(got[0], ("C:\\a\tb\\x.gif".to_string(), s)); // a path with a tab survives
+        assert_eq!(got[1].1.rot, 0);
     }
 
     #[test]
