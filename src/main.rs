@@ -204,16 +204,17 @@ fn open_dialog(owner: HWND, multi: bool) -> Vec<String> {
 unsafe fn dropped_files(wp: WPARAM) -> Vec<String> {
     let hdrop = wp as HDROP;
     let count = DragQueryFileW(hdrop, u32::MAX, null_mut(), 0).min(10);
-    let mut out = Vec::new();
-    for i in 0..count {
-        let mut buf = [0u16; 1024];
-        let n = DragQueryFileW(hdrop, i, buf.as_mut_ptr(), buf.len() as u32) as usize;
-        if n > 0 {
-            out.push(String::from_utf16_lossy(&buf[..n]));
-        }
-    }
+    let out = (0..count).filter_map(|i| drop_path(hdrop, i)).collect();
     DragFinish(hdrop);
     out
+}
+
+/// File `i` of a drop / clipboard file list, however long its path is.
+unsafe fn drop_path(hdrop: HDROP, i: u32) -> Option<String> {
+    let n = DragQueryFileW(hdrop, i, null_mut(), 0) as usize;
+    let mut buf = vec![0u16; n + 1];
+    let n = DragQueryFileW(hdrop, i, buf.as_mut_ptr(), buf.len() as u32) as usize;
+    (n > 0).then(|| String::from_utf16_lossy(&buf[..n]))
 }
 
 // =====================================================================
@@ -827,10 +828,8 @@ unsafe fn read_clipboard() -> Option<Clip> {
     }
     let r = (|| {
         if IsClipboardFormatAvailable(CF_HDROP) != 0 {
-            let mut buf = [0u16; 1024];
-            let n = DragQueryFileW(GetClipboardData(CF_HDROP) as HDROP, 0, buf.as_mut_ptr(), buf.len() as u32) as usize;
-            if n > 0 {
-                return Some(Clip::File(String::from_utf16_lossy(&buf[..n])));
+            if let Some(p) = drop_path(GetClipboardData(CF_HDROP) as HDROP, 0) {
+                return Some(Clip::File(p));
             }
         }
         let png = RegisterClipboardFormatW(wide("PNG").as_ptr());
@@ -1998,7 +1997,7 @@ unsafe fn build_menu(hwnd: HWND, sort: u8) {
     let add = |m: HMENU, flags: u32, id: usize, text: &str| {
         AppendMenuW(m, flags, id, wide(text).as_ptr());
     };
-    add(file, MF_STRING, IDC_ADD, "Add image");
+    add(file, MF_STRING, IDC_ADD, "Add image\tCtrl+O");
     add(file, MF_STRING, IDC_PASTE, "Paste image or link\tCtrl+V");
     add(file, MF_SEPARATOR, 0, "");
     add(file, MF_STRING, IDC_CLEAR, "Clear history");
@@ -2159,6 +2158,13 @@ fn main() {
             // Ctrl+V works in every window of the app (not on key repeat),
             if msg.message == WM_KEYDOWN && msg.wParam == 0x56 && msg.lParam & (1 << 30) == 0 && GetAsyncKeyState(VK_CONTROL as i32) < 0 {
                 paste();
+                continue;
+            }
+            // Ctrl+O: add images (like File > Add image)
+            if msg.message == WM_KEYDOWN && msg.wParam == 0x4F && msg.lParam & (1 << 30) == 0 && GetAsyncKeyState(VK_CONTROL as i32) < 0 {
+                for p in open_dialog(msg.hwnd, true) {
+                    open_gif(&p);
+                }
                 continue;
             }
             TranslateMessage(&msg);
