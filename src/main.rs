@@ -169,12 +169,13 @@ fn sample(f: &[u32], gw: usize, gh: usize, x: f32, y: f32) -> u32 {
     out
 }
 
-fn open_dialog(owner: HWND) -> Option<String> {
+/// Several files can be picked when `multi` is set (up to 10, like a drop).
+fn open_dialog(owner: HWND, multi: bool) -> Vec<String> {
     let filter: Vec<u16> = "Images\0*.gif;*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp;*.apng;*.avif\0GIF Files\0*.gif\0All Files\0*.*\0\0"
         .encode_utf16()
         .collect();
     let title = wide("Select Image");
-    let mut buf = [0u16; 1024];
+    let mut buf = vec![0u16; 16 * 1024];
     unsafe {
         let mut ofn: OPENFILENAMEW = mem::zeroed();
         ofn.lStructSize = mem::size_of::<OPENFILENAMEW>() as u32;
@@ -183,13 +184,20 @@ fn open_dialog(owner: HWND) -> Option<String> {
         ofn.lpstrFile = buf.as_mut_ptr();
         ofn.nMaxFile = buf.len() as u32;
         ofn.lpstrTitle = title.as_ptr();
-        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | if multi { OFN_ALLOWMULTISELECT | OFN_EXPLORER } else { 0 };
         if GetOpenFileNameW(&mut ofn) == 0 {
-            return None;
+            return Vec::new();
         }
     }
-    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-    Some(String::from_utf16_lossy(&buf[..len]))
+    // one file: "path\0\0"; several: "dir\0name1\0name2\0\0"
+    let mut parts = buf.split(|&c| c == 0).take_while(|p| !p.is_empty()).map(String::from_utf16_lossy);
+    let first = parts.next();
+    let rest: Vec<String> = parts.take(10).collect();
+    match first {
+        Some(dir) if !rest.is_empty() => rest.iter().map(|n| Path::new(&dir).join(n).to_string_lossy().into_owned()).collect(),
+        Some(one) => vec![one],
+        None => Vec::new(),
+    }
 }
 
 /// Files of a WM_DROPFILES message (at most 10, so a careless drop cannot spawn hundreds of decodes).
@@ -1069,8 +1077,8 @@ fn command(a: &mut App, id: usize) {
             render(a); // show / hide the handles and the X right away
         }
         ID_OPEN => {
-            if let Some(p) = open_dialog(a.hwnd) {
-                start_load(&p, a.hwnd);
+            if let Some(p) = open_dialog(a.hwnd, false).first() {
+                start_load(p, a.hwnd);
             }
         }
         ID_HISTORY => show_dash(),
@@ -1747,7 +1755,7 @@ fn context_menu_dash(hwnd: HWND, lp: LPARAM) {
             (IDM_COPYPATH, Some(p)) => copy_text(hwnd, &p),
             (IDM_REMOVE, Some(p)) => remove_item(&p),
             (IDM_ADD, _) => {
-                if let Some(p) = open_dialog(hwnd) {
+                for p in open_dialog(hwnd, true) {
                     open_gif(&p);
                 }
             }
@@ -1885,7 +1893,7 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             0
         }
         WM_COMMAND if wp & 0xFFFF == IDC_ADD => {
-            if let Some(p) = open_dialog(hwnd) {
+            for p in open_dialog(hwnd, true) {
                 open_gif(&p);
             }
             0
