@@ -97,9 +97,13 @@ fn write_settings(opacity: u32) {
   \"Opacity\": {},
   \"DashSort\": {},
   \"RestoreSession\": {},
-  \"Language\": \"{}\"
+  \"Language\": \"{}\",
+  \"AutoUpdate\": {},
+  \"LastUpdateCheck\": {},
+  \"UpdateNotified\": \"{}\"
 }}",
-        opacity as f64 / 100.0, dash().sort, dash().restore, dash().lang.map_or("auto", |i| lang::CODES[i])
+        opacity as f64 / 100.0, dash().sort, dash().restore, dash().lang.map_or("auto", |i| lang::CODES[i]),
+        dash().upd.auto, dash().upd.last_check, dash().upd.notified
     );
     write_atomic("settings.json", json.as_bytes());
 }
@@ -1181,7 +1185,7 @@ fn version_parts(v: &str) -> Vec<u32> {
 
 /// Asks GitHub for the latest release on a worker thread (only when the user picks Help > Check for
 /// updates); the tag comes back to the dashboard as WM_UPDATE.
-fn check_update() {
+fn check_update(silent: bool) {
     if CHECKING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return; // already checking
     }
@@ -1200,14 +1204,42 @@ fn check_update() {
             json_val(&json?, "tag_name").map(|t| t.trim_matches('"').to_string()).ok_or(tr("no release found"))
         })();
         let msg = Box::into_raw(Box::new(res));
-        if unsafe { PostMessageW(dash_hwnd as HWND, WM_UPDATE, 0, msg as isize) } == 0 {
+        if unsafe { PostMessageW(dash_hwnd as HWND, WM_UPDATE, silent as usize, msg as isize) } == 0 {
             drop(unsafe { Box::from_raw(msg) });
         }
     });
 }
 
-unsafe fn show_update_result(hwnd: HWND, res: Result<String, String>) {
+fn today() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 86400)
+}
+
+/// Startup check, only when the user turned it on (Help menu) and at most once a day. It is quiet:
+/// see `show_update_result`.
+fn auto_check_update() {
+    if dash().upd.auto && today() > dash().upd.last_check {
+        check_update(true);
+    }
+}
+
+/// `silent` is the daily check: no message unless a version the user has not been told about yet is out.
+unsafe fn show_update_result(hwnd: HWND, mut res: Result<String, String>, silent: bool) {
     CHECKING.store(false, std::sync::atomic::Ordering::SeqCst);
+    if silent {
+        let d = dash();
+        if res.is_ok() {
+            d.upd.last_check = today(); // a failed check (offline) is retried at the next start
+        }
+        match res {
+            Ok(tag) if version_parts(&tag) > version_parts(VERSION) && tag != d.upd.notified => d.upd.notified = tag,
+            _ => {
+                write_settings(saved_opacity());
+                return;
+            }
+        }
+        write_settings(saved_opacity());
+        res = Ok(d.upd.notified.clone()); // fall through to the same message as the manual check
+    }
     let title = wide(&tr("Check for updates"));
     match res {
         Ok(tag) if version_parts(&tag) > version_parts(VERSION) => {
@@ -1667,6 +1699,7 @@ const IDC_PASTE: usize = 1009;
 const IDC_QUIT_APP: usize = 1010;
 const IDC_UPDATE: usize = 1012;
 const IDC_RESTORE: usize = 1014;
+const IDC_AUTOUPD: usize = 1015;
 const IDC_WIN_MIN: usize = 1020;
 const IDC_WIN_RESTORE: usize = 1021;
 const IDC_WIN_CLOSE: usize = 1022;
@@ -1698,12 +1731,20 @@ struct Thumb {
     px: Vec<u32>, // opaque BGRA, tw*th
 }
 
+/// The "check for updates automatically" choice and what it remembers (settings.json).
+struct UpdatePrefs {
+    auto: bool, // off unless the user turns it on: nothing is sent without that
+    last_check: u64, // day number (days since 1970) of the last successful check
+    notified: String, // newest version the user has already been told about
+}
+
 struct Dash {
     hwnd: HWND,
     list: HWND,
     sort: u8, // one of the SORT_* values (the View menu order)
     restore: bool, // reopen the last session's windows at start (File menu)
     lang: Option<usize>, // chosen language (index into lang::CODES); None follows the system
+    upd: UpdatePrefs,
     empty: HWND,
     scale: f32, // DPI / 96
     tw: usize,  // thumbnail size in pixels
@@ -2071,6 +2112,13 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             set_language(hwnd, (wp & 0xFFFF).checked_sub(IDM_LANG_BASE + 1)); // first entry = system default
             0
         }
+        WM_COMMAND if wp & 0xFFFF == IDC_AUTOUPD => {
+            let d = dash();
+            d.upd.auto = !d.upd.auto;
+            CheckMenuItem(GetMenu(hwnd), IDC_AUTOUPD as u32, MF_BYCOMMAND | if d.upd.auto { MF_CHECKED } else { MF_UNCHECKED });
+            write_settings(saved_opacity());
+            0
+        }
         WM_COMMAND if wp & 0xFFFF == IDC_RESTORE => {
             let d = dash();
             d.restore = !d.restore;
@@ -2088,11 +2136,11 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             0
         }
         WM_COMMAND if wp & 0xFFFF == IDC_UPDATE => {
-            check_update();
+            check_update(false);
             0
         }
         WM_UPDATE => {
-            show_update_result(hwnd, *Box::from_raw(lp as *mut Result<String, String>));
+            show_update_result(hwnd, *Box::from_raw(lp as *mut Result<String, String>), wp != 0);
             0
         }
         // the Window menu (3rd of the bar) lists the open images each time it opens
@@ -2270,14 +2318,14 @@ unsafe fn set_language(hwnd: HWND, pref: Option<usize>) {
     let old = GetMenu(hwnd);
     SetMenu(hwnd, null_mut());
     DestroyMenu(old);
-    build_menu(hwnd, d.sort, d.restore, pref);
+    build_menu(hwnd, d.sort, d.restore, pref, d.upd.auto);
     SetWindowTextW(d.empty, wide(&tr(EMPTY_TEXT)).as_ptr());
     write_settings(saved_opacity()); // remember the choice
     refresh_dash(); // "(open)" labels
 }
 
 /// Menu bar of the dashboard: File / View / Help. Commands reuse the old button ids.
-unsafe fn build_menu(hwnd: HWND, sort: u8, restore: bool, pref: Option<usize>) {
+unsafe fn build_menu(hwnd: HWND, sort: u8, restore: bool, pref: Option<usize>, auto_update: bool) {
     let bar = CreateMenu();
     let (file, view, help) = (CreatePopupMenu(), CreatePopupMenu(), CreatePopupMenu());
     let add = |m: HMENU, flags: u32, id: usize, text: &str| {
@@ -2309,6 +2357,7 @@ unsafe fn build_menu(hwnd: HWND, sort: u8, restore: bool, pref: Option<usize>) {
     add(help, MF_STRING, IDC_BUG, "Report a bug");
     add(help, MF_SEPARATOR, 0, "");
     add(help, MF_STRING, IDC_UPDATE, "Check for updates");
+    add(help, MF_STRING | if auto_update { MF_CHECKED } else { 0 }, IDC_AUTOUPD, "Check for updates automatically");
     add(help, MF_STRING | MF_GRAYED, IDC_VERSION, &trf("Version {}", &[VERSION]));
     add(bar, MF_POPUP, file as usize, "File");
     add(bar, MF_POPUP, view as usize, "View");
@@ -2360,11 +2409,16 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
         .filter(|&v| v <= SORT_SIZE_ASC)
         .unwrap_or(SORT_RECENT);
     let restore = json_val(&settings, "RestoreSession").is_none_or(|v| v != "false"); // on unless turned off
-    build_menu(hwnd, sort, restore, pref);
+    let upd = UpdatePrefs {
+        auto: json_val(&settings, "AutoUpdate").is_some_and(|v| v == "true"),
+        last_check: json_val(&settings, "LastUpdateCheck").and_then(|v| v.parse().ok()).unwrap_or(0),
+        notified: json_val(&settings, "UpdateNotified").map(|v| v.trim_matches('"').to_string()).unwrap_or_default(),
+    };
+    build_menu(hwnd, sort, restore, pref, upd.auto);
 
     let (tw, th) = (s(144.0) as usize, s(112.0) as usize);
     SendMessageW(list, LVM_SETICONSPACING, 0, ((th as isize + s(60.0) as isize) << 16) | (tw as isize + s(28.0) as isize));
-    *dash() = Dash { hwnd, list, sort, restore, lang: pref, empty, scale, tw, th, items: Vec::new(), loading: Vec::new() };
+    *dash() = Dash { hwnd, list, sort, restore, lang: pref, upd, empty, scale, tw, th, items: Vec::new(), loading: Vec::new() };
     DragAcceptFiles(hwnd, 1);
     RegisterHotKey(hwnd, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 0x47); // Ctrl+Alt+G; if another app owns it the Window menu item still works
     layout();
@@ -2436,6 +2490,7 @@ fn main() {
             sort: SORT_RECENT,
             restore: true,
             lang: None,
+            upd: UpdatePrefs { auto: false, last_check: 0, notified: String::new() },
             empty: null_mut(),
             scale: 1.0,
             tw: 0,
@@ -2462,6 +2517,8 @@ fn main() {
             None if last.is_empty() => show_dash(),
             None => {} // the restored windows are the app's windows; the dashboard is one click away
         }
+
+        auto_check_update();
 
         let mut msg: MSG = mem::zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
