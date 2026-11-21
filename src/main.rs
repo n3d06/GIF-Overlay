@@ -8,6 +8,8 @@ use std::{
     slice,
 };
 mod decode;
+mod lang;
+use lang::{t as tr, tf as trf};
 use decode::{decode, Decoded};
 use windows_sys::Win32::{
     Foundation::*,
@@ -94,9 +96,10 @@ fn write_settings(opacity: u32) {
         "{{
   \"Opacity\": {},
   \"DashSort\": {},
-  \"RestoreSession\": {}
+  \"RestoreSession\": {},
+  \"Language\": \"{}\"
 }}",
-        opacity as f64 / 100.0, dash().sort, dash().restore
+        opacity as f64 / 100.0, dash().sort, dash().restore, dash().lang.map_or("auto", |i| lang::CODES[i])
     );
     write_atomic("settings.json", json.as_bytes());
 }
@@ -176,10 +179,13 @@ fn sample(f: &[u32], gw: usize, gh: usize, x: f32, y: f32) -> u32 {
 
 /// Several files can be picked when `multi` is set (up to 10, like a drop).
 fn open_dialog(owner: HWND, multi: bool) -> Vec<String> {
-    let filter: Vec<u16> = "Images\0*.gif;*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp;*.apng;*.avif\0GIF Files\0*.gif\0All Files\0*.*\0\0"
-        .encode_utf16()
-        .collect();
-    let title = wide("Select Image");
+    let filter: Vec<u16> = format!(
+        "{}\0*.gif;*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp;*.apng;*.avif\0{}\0*.gif\0{}\0*.*\0\0",
+        tr("Images"), tr("GIF Files"), tr("All Files")
+    )
+    .encode_utf16()
+    .collect();
+    let title = wide(&tr("Select Image"));
     let mut buf = vec![0u16; 16 * 1024];
     unsafe {
         let mut ofn: OPENFILENAMEW = mem::zeroed();
@@ -641,7 +647,7 @@ fn center(a: &App, offset: i32) {
 
 fn show_error(e: &str) {
     unsafe {
-        MessageBoxW(null_mut(), wide(e).as_ptr(), wide("Error").as_ptr(), MB_OK | MB_ICONERROR);
+        MessageBoxW(null_mut(), wide(e).as_ptr(), wide(&tr("Error")).as_ptr(), MB_OK | MB_ICONERROR);
     }
 }
 
@@ -866,9 +872,9 @@ fn start_load_with(path: &str, target: HWND, state: Option<Saved>) {
     }
     d.loading.push(path.clone());
     unsafe {
-        SetWindowTextW(d.hwnd, wide("GIF Overlay - loading...").as_ptr());
+        SetWindowTextW(d.hwnd, wide(&tr("GIF Overlay - loading...")).as_ptr());
         if !target.is_null() {
-            SetWindowTextW(target, wide("Loading...").as_ptr());
+            SetWindowTextW(target, wide(&tr("Loading...")).as_ptr());
         }
     }
     let (dash_hwnd, target) = (d.hwnd as usize, target as usize);
@@ -877,7 +883,7 @@ fn start_load_with(path: &str, target: HWND, state: Option<Saved>) {
         let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok(); // WIC needs COM on this thread
         // a decoder bug on a bad file must not take every window down with it
         let res = std::panic::catch_unwind(|| decode(&path, usize::MAX))
-            .unwrap_or_else(|_| Err("the decoder crashed on this file".into()));
+            .unwrap_or_else(|_| Err(tr("the decoder crashed on this file")));
         if com {
             unsafe { CoUninitialize() };
         }
@@ -924,7 +930,7 @@ unsafe fn finish_load(l: Loaded) {
                 set_title((*p).hwnd, &(*p).path); // undo "Loading..."
             }
             if l.state.is_none() {
-                show_error(&format!("Failed to load image: {e}")); // a file of the last session that no longer opens is skipped quietly
+                show_error(&trf("Failed to load image: {}", &[&e])); // a file of the last session that no longer opens is skipped quietly
                 history_remove(&l.path);
             }
             if overlays().is_empty() && d.loading.is_empty() {
@@ -1040,26 +1046,26 @@ fn paste() {
         Some(Clip::Url(u)) => fetch(u),
         Some(Clip::Image(bytes, ext)) => match pasted_file(&format!("paste.{ext}")).filter(|p| fs::write(p, &bytes).is_ok()) {
             Some(p) => open_gif(&p.to_string_lossy()),
-            None => show_error("Cannot save the pasted image next to the app."),
+            None => show_error(&tr("Cannot save the pasted image next to the app.")),
         },
-        None => show_error("The clipboard has no image, image file or image link."),
+        None => show_error(&tr("The clipboard has no image, image file or image link.")),
     }
 }
 
 /// Downloads `url` on a worker thread (shortcut: no size limit or cancel, add if big links hang the title).
 fn fetch(url: String) {
-    unsafe { SetWindowTextW(dash().hwnd, wide("GIF Overlay - downloading...").as_ptr()) };
+    unsafe { SetWindowTextW(dash().hwnd, wide(&tr("GIF Overlay - downloading...")).as_ptr()) };
     let dash_hwnd = dash().hwnd as usize;
     std::thread::spawn(move || {
         use windows::{core::HSTRING, Win32::System::Com::Urlmon::URLDownloadToFileW};
         let name: String = url.split(['?', '#']).next().unwrap_or("").rsplit('/').next().unwrap_or("")
             .chars().filter(|c| c.is_ascii_alphanumeric() || ".-_".contains(*c)).take(60).collect();
         let res: Result<String, String> = pasted_file(if name.is_empty() { "image" } else { &name })
-            .ok_or("Cannot create the pasted folder next to the app.".to_string())
+            .ok_or(tr("Cannot create the pasted folder next to the app."))
             .and_then(|p| {
                 unsafe { URLDownloadToFileW(None, &HSTRING::from(url.as_str()), &HSTRING::from(p.as_os_str()), 0, None) }
                     .map(|_| p.to_string_lossy().into_owned())
-                    .map_err(|e| format!("Download failed: {}", e.message()))
+                    .map_err(|e| trf("Download failed: {}", &[&e.message()]))
             });
         let msg = Box::into_raw(Box::new(res));
         if unsafe { PostMessageW(dash_hwnd as HWND, WM_FETCHED, 0, msg as isize) } == 0 {
@@ -1176,7 +1182,7 @@ fn check_update() {
                 .map_err(|e| e.message())?;
             let json = fs::read_to_string(&tmp).map_err(|e| e.to_string());
             let _ = fs::remove_file(&tmp);
-            json_val(&json?, "tag_name").map(|t| t.trim_matches('"').to_string()).ok_or("no release found".to_string())
+            json_val(&json?, "tag_name").map(|t| t.trim_matches('"').to_string()).ok_or(tr("no release found"))
         })();
         let msg = Box::into_raw(Box::new(res));
         if unsafe { PostMessageW(dash_hwnd as HWND, WM_UPDATE, 0, msg as isize) } == 0 {
@@ -1187,20 +1193,20 @@ fn check_update() {
 
 unsafe fn show_update_result(hwnd: HWND, res: Result<String, String>) {
     CHECKING.store(false, std::sync::atomic::Ordering::SeqCst);
-    let title = wide("Check for updates");
+    let title = wide(&tr("Check for updates"));
     match res {
         Ok(tag) if version_parts(&tag) > version_parts(VERSION) => {
-            let q = wide(&format!("Version {} is available (you have {VERSION}).\nOpen the download page?", tag.trim_start_matches('v')));
+            let q = wide(&trf("Version {} is available (you have {}).\nOpen the download page?", &[tag.trim_start_matches('v'), VERSION]));
             if MessageBoxW(hwnd, q.as_ptr(), title.as_ptr(), MB_YESNO | MB_ICONINFORMATION) == IDYES {
                 ShellExecuteW(null_mut(), wide("open").as_ptr(), wide(RELEASES_URL).as_ptr(), null(), null(), SW_SHOWNORMAL);
             }
         }
         Ok(_) => {
-            let m = wide(&format!("You are up to date (version {VERSION})."));
+            let m = wide(&trf("You are up to date (version {}).", &[VERSION]));
             MessageBoxW(hwnd, m.as_ptr(), title.as_ptr(), MB_OK | MB_ICONINFORMATION);
         }
         Err(e) => {
-            let m = wide(&format!("Could not check for updates: {e}"));
+            let m = wide(&trf("Could not check for updates: {}", &[&e]));
             MessageBoxW(hwnd, m.as_ptr(), title.as_ptr(), MB_OK | MB_ICONERROR);
         }
     }
@@ -1335,7 +1341,7 @@ fn context_menu(hwnd: HWND) {
         let speed = a.speed;
         let topmost = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST as isize != 0;
         let add =|m: HMENU, flags: u32, id: usize, text: &str| {
-            AppendMenuW(m, flags, id, wide(text).as_ptr());
+            AppendMenuW(m, flags, id, wide(&tr(text)).as_ptr());
         };
         let check = |on: bool| if on { MF_CHECKED } else { 0 };
         let menu = CreatePopupMenu();
@@ -1648,6 +1654,7 @@ const WIN_MAX: usize = 100;
 const IDC_VERSION: usize = 1013;
 const IDM_SORT_RECENT: usize = 1101;
 const IDM_SORT_LAST: usize = 1105; // the five sort items are IDM_SORT_RECENT + the SORT_* value
+const IDM_LANG_BASE: usize = 1200; // "system default", then + 1 + the language index
 const EMPTY_TEXT: &str = "No history yet\r\nUse File > Add image or drop an image here.";
 const SORT_RECENT: u8 = 0;
 const SORT_NAME: u8 = 1;
@@ -1674,6 +1681,7 @@ struct Dash {
     list: HWND,
     sort: u8, // one of the SORT_* values (the View menu order)
     restore: bool, // reopen the last session's windows at start (File menu)
+    lang: Option<usize>, // chosen language (index into lang::CODES); None follows the system
     empty: HWND,
     scale: f32, // DPI / 96
     tw: usize,  // thumbnail size in pixels
@@ -1827,7 +1835,7 @@ fn refresh_dash() {
             ImageList_Destroy(prev as HIMAGELIST);
         }
         for (i, t) in d.items.iter().enumerate() {
-            let label = if is_open(t) { format!("{} (open)", t.name) } else { t.name.clone() };
+            let label = if is_open(t) { trf("{} (open)", &[&t.name]) } else { t.name.clone() };
             let mut name = wide(&label);
             let mut it: LVITEMW = mem::zeroed();
             it.mask = LVIF_TEXT | LVIF_IMAGE;
@@ -1934,7 +1942,7 @@ fn context_menu_dash(hwnd: HWND, lp: LPARAM) {
         ClientToScreen(list, &mut pt);
         let menu = CreatePopupMenu();
         let add = |flags: u32, id: usize, text: &str| {
-            AppendMenuW(menu, flags, id, wide(text).as_ptr());
+            AppendMenuW(menu, flags, id, wide(&tr(text)).as_ptr());
         };
         if let Some(i) = item {
             let exists = Path::new(&dash().items[i].path).exists();
@@ -1994,29 +2002,36 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             0
         }
         WM_COMMAND if wp & 0xFFFF == IDC_HELP => {
-            let text = "OPEN AN IMAGE\n\
-                \u{2022} Use File > Add image, drop a file here, or double-click a thumbnail.\n\
-                \u{2022} Ctrl+V pastes a screenshot, a copied file, or an image link (http / https).\n\
-                \u{2022} Right-click a thumbnail: Open, Show in folder, Copy path (Ctrl+C), Remove (Delete).\n\
-                \u{2022} Right-click an empty spot for Add image and Paste.\n\n\
-                ON AN IMAGE\n\
-                \u{2022} Drag the image to move it. Hover it to show the buttons at the top right: minimize, maximize and close.\n\
-                \u{2022} Drag the right edge, bottom edge or the corner to resize. Ctrl + mouse wheel zooms.\n\
-                \u{2022} Maximize stretches the image over the whole screen; click it again to restore.\n\
-                \u{2022} Drop another file on the image to replace it.\n\
-                \u{2022} Right-click for the menu: scale, opacity, rotate / flip, pause, lock, always on top, copy image, show in folder, replace image, dashboard, close and quit.\n\
-                \u{2022} Keys: Esc closes, Space pauses, Left / Right step one frame, - / + change the speed, Up / Down change the opacity, Ctrl+C copies the image.\n\n\
-                LOCK WINDOW\n\
-                \u{2022} A locked image is click-through, so it never gets in the way.\n\
-                \u{2022} To unlock it, hold Ctrl and click the image.\n\n\
-                FOUND A PROBLEM?\n\
-                \u{2022} Use Help > Report a bug to open the issue page on GitHub.";
-            MessageBoxW(hwnd, wide(text).as_ptr(), wide("How to use GIF Overlay").as_ptr(), MB_OK | MB_ICONINFORMATION);
+            // one translated line per entry; "" is a blank line between the sections
+            const LINES: [&str; 20] = [
+                "OPEN AN IMAGE",
+                "\u{2022} Use File > Add image, drop a file here, or double-click a thumbnail.",
+                "\u{2022} Ctrl+V pastes a screenshot, a copied file, or an image link (http / https).",
+                "\u{2022} Right-click a thumbnail: Open, Show in folder, Copy path (Ctrl+C), Remove (Delete).",
+                "\u{2022} Right-click an empty spot for Add image and Paste.",
+                "",
+                "ON AN IMAGE",
+                "\u{2022} Drag the image to move it. Hover it to show the buttons at the top right: minimize, maximize and close.",
+                "\u{2022} Drag the right edge, bottom edge or the corner to resize. Ctrl + mouse wheel zooms.",
+                "\u{2022} Maximize stretches the image over the whole screen; click it again to restore.",
+                "\u{2022} Drop another file on the image to replace it.",
+                "\u{2022} Right-click for the menu: scale, opacity, rotate / flip, pause, lock, always on top, copy image, show in folder, replace image, dashboard, close and quit.",
+                "\u{2022} Keys: Esc closes, Space pauses, Left / Right step one frame, - / + change the speed, Up / Down change the opacity, Ctrl+C copies the image.",
+                "",
+                "LOCK WINDOW",
+                "\u{2022} A locked image is click-through, so it never gets in the way.",
+                "\u{2022} To unlock it, hold Ctrl and click the image.",
+                "",
+                "FOUND A PROBLEM?",
+                "\u{2022} Use Help > Report a bug to open the issue page on GitHub.",
+            ];
+            let text = LINES.iter().map(|l| if l.is_empty() { String::new() } else { tr(l) }).collect::<Vec<_>>().join("\n");
+            MessageBoxW(hwnd, wide(&text).as_ptr(), wide(&tr("How to use GIF Overlay")).as_ptr(), MB_OK | MB_ICONINFORMATION);
             0
         }
         WM_COMMAND if wp & 0xFFFF == IDC_CLEAR => {
             let q = wide("Clear the history list?\nThe image files themselves are not deleted.");
-            if MessageBoxW(hwnd, q.as_ptr(), wide("Clear history").as_ptr(), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES {
+            if MessageBoxW(hwnd, q.as_ptr(), wide(&tr("Clear history")).as_ptr(), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES {
                 history_save(&[]);
                 refresh_dash();
             }
@@ -2028,6 +2043,10 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             CheckMenuRadioItem(GetSubMenu(GetMenu(hwnd), 1), IDM_SORT_RECENT as u32, IDM_SORT_LAST as u32, id as u32, MF_BYCOMMAND);
             write_settings(saved_opacity()); // remember the choice
             refresh_dash();
+            0
+        }
+        WM_COMMAND if (IDM_LANG_BASE..=IDM_LANG_BASE + lang::NAMES.len()).contains(&(wp & 0xFFFF)) => {
+            set_language(hwnd, (wp & 0xFFFF).checked_sub(IDM_LANG_BASE + 1)); // first entry = system default
             0
         }
         WM_COMMAND if wp & 0xFFFF == IDC_RESTORE => {
@@ -2060,7 +2079,7 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             while DeleteMenu(m, 0, MF_BYPOSITION) != 0 {}
             let names: Vec<String> = overlays().iter().take(WIN_MAX).map(|&p| (*p).path.clone()).collect();
             if names.is_empty() {
-                AppendMenuW(m, MF_STRING | MF_GRAYED, 0, wide("No open images").as_ptr());
+                AppendMenuW(m, MF_STRING | MF_GRAYED, 0, wide(&tr("No open images")).as_ptr());
             }
             for (i, p) in names.iter().enumerate() {
                 let name = Path::new(p).file_name().map_or(p.clone(), |n| n.to_string_lossy().into_owned());
@@ -2068,9 +2087,9 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             }
             AppendMenuW(m, MF_SEPARATOR, 0, null());
             let on = if names.is_empty() { MF_GRAYED } else { 0 };
-            AppendMenuW(m, MF_STRING | on, IDC_WIN_MIN, wide("Minimize all").as_ptr());
-            AppendMenuW(m, MF_STRING | on, IDC_WIN_RESTORE, wide("Restore all").as_ptr());
-            AppendMenuW(m, MF_STRING | on, IDC_WIN_CLOSE, wide("Close all windows").as_ptr());
+            AppendMenuW(m, MF_STRING | on, IDC_WIN_MIN, wide(&tr("Minimize all")).as_ptr());
+            AppendMenuW(m, MF_STRING | on, IDC_WIN_RESTORE, wide(&tr("Restore all")).as_ptr());
+            AppendMenuW(m, MF_STRING | on, IDC_WIN_CLOSE, wide(&tr("Close all windows")).as_ptr());
             0
         }
         WM_COMMAND if (IDC_WIN_BASE..IDC_WIN_BASE + WIN_MAX).contains(&(wp & 0xFFFF)) => {
@@ -2207,12 +2226,31 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
     }
 }
 
+/// Index into `lang::CODES` for the system's display language.
+fn system_language() -> usize {
+    lang::detect(unsafe { windows_sys::Win32::Globalization::GetUserDefaultUILanguage() })
+}
+
+/// Switches the language on the fly: the menu bar is rebuilt, the other texts follow when they next appear.
+unsafe fn set_language(hwnd: HWND, pref: Option<usize>) {
+    let d = dash();
+    d.lang = pref;
+    lang::set(pref.unwrap_or_else(system_language));
+    let old = GetMenu(hwnd);
+    SetMenu(hwnd, null_mut());
+    DestroyMenu(old);
+    build_menu(hwnd, d.sort, d.restore, pref);
+    SetWindowTextW(d.empty, wide(&tr(EMPTY_TEXT)).as_ptr());
+    write_settings(saved_opacity()); // remember the choice
+    refresh_dash(); // "(open)" labels
+}
+
 /// Menu bar of the dashboard: File / View / Help. Commands reuse the old button ids.
-unsafe fn build_menu(hwnd: HWND, sort: u8, restore: bool) {
+unsafe fn build_menu(hwnd: HWND, sort: u8, restore: bool, pref: Option<usize>) {
     let bar = CreateMenu();
     let (file, view, help) = (CreatePopupMenu(), CreatePopupMenu(), CreatePopupMenu());
     let add = |m: HMENU, flags: u32, id: usize, text: &str| {
-        AppendMenuW(m, flags, id, wide(text).as_ptr());
+        AppendMenuW(m, flags, id, wide(&tr(text)).as_ptr());
     };
     add(file, MF_STRING, IDC_ADD, "Add image\tCtrl+O");
     add(file, MF_STRING, IDC_PASTE, "Paste image or link\tCtrl+V");
@@ -2226,13 +2264,21 @@ unsafe fn build_menu(hwnd: HWND, sort: u8, restore: bool) {
     add(view, MF_STRING, IDM_SORT_RECENT + SORT_NAME_DESC as usize, "Sort by name (Z\u{2013}A)");
     add(view, MF_STRING, IDM_SORT_RECENT + SORT_SIZE_DESC as usize, "Sort by size (largest first)");
     add(view, MF_STRING, IDM_SORT_RECENT + SORT_SIZE_ASC as usize, "Sort by size (smallest first)");
+    add(view, MF_SEPARATOR, 0, "");
+    let langs = CreatePopupMenu();
+    add(langs, MF_STRING, IDM_LANG_BASE, "System default");
+    for (i, name) in lang::NAMES.iter().enumerate() {
+        AppendMenuW(langs, MF_STRING, IDM_LANG_BASE + 1 + i, wide(name).as_ptr()); // each language in its own name
+    }
+    CheckMenuRadioItem(langs, IDM_LANG_BASE as u32, (IDM_LANG_BASE + lang::NAMES.len()) as u32, (IDM_LANG_BASE + pref.map_or(0, |i| i + 1)) as u32, MF_BYCOMMAND);
+    add(view, MF_POPUP, langs as usize, "Language");
     add(help, MF_STRING, IDC_HELP, "How to use");
     add(help, MF_STRING, IDC_DEFAULT, "Set as default viewer");
     add(help, MF_SEPARATOR, 0, "");
     add(help, MF_STRING, IDC_BUG, "Report a bug");
     add(help, MF_SEPARATOR, 0, "");
     add(help, MF_STRING, IDC_UPDATE, "Check for updates");
-    add(help, MF_STRING | MF_GRAYED, IDC_VERSION, &format!("Version {VERSION}"));
+    add(help, MF_STRING | MF_GRAYED, IDC_VERSION, &trf("Version {}", &[VERSION]));
     add(bar, MF_POPUP, file as usize, "File");
     add(bar, MF_POPUP, view as usize, "View");
     add(bar, MF_POPUP, CreatePopupMenu() as usize, "Window"); // filled in by WM_INITMENUPOPUP
@@ -2245,6 +2291,10 @@ unsafe fn build_menu(hwnd: HWND, sort: u8, restore: bool) {
 unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     let icc = INITCOMMONCONTROLSEX { dwSize: mem::size_of::<INITCOMMONCONTROLSEX>() as u32, dwICC: ICC_LISTVIEW_CLASSES };
     InitCommonControlsEx(&icc);
+    let settings = fs::read_to_string(exe_file("settings.json")).unwrap_or_default();
+    // the texts below are created in the saved language (no saved choice: the system's display language)
+    let pref = json_val(&settings, "Language").and_then(|v| lang::CODES.iter().position(|c| *c == v.trim_matches('"')));
+    lang::set(pref.unwrap_or_else(system_language));
     let dpi = GetDpiForSystem();
     let scale = dpi as f32 / 96.0;
     let s = |v: f32| (v * scale) as i32;
@@ -2262,7 +2312,7 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
         WS_VISIBLE | WS_TABSTOP | LVS_ICON | LVS_AUTOARRANGE | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
         IDC_LIST,
     );
-    let empty = child("STATIC", EMPTY_TEXT, 0x1 /* SS_CENTER */, 0);
+    let empty = child("STATIC", &tr(EMPTY_TEXT), 0x1 /* SS_CENTER */, 0);
 
     // Explorer-style selection and system UI font, like any native app
     SetWindowTheme(list, wide("Explorer").as_ptr(), null());
@@ -2278,13 +2328,12 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
         .and_then(|v| v.parse::<u8>().ok())
         .filter(|&v| v <= SORT_SIZE_ASC)
         .unwrap_or(SORT_RECENT);
-    let settings = fs::read_to_string(exe_file("settings.json")).unwrap_or_default();
     let restore = json_val(&settings, "RestoreSession").is_none_or(|v| v != "false"); // on unless turned off
-    build_menu(hwnd, sort, restore);
+    build_menu(hwnd, sort, restore, pref);
 
     let (tw, th) = (s(144.0) as usize, s(112.0) as usize);
     SendMessageW(list, LVM_SETICONSPACING, 0, ((th as isize + s(60.0) as isize) << 16) | (tw as isize + s(28.0) as isize));
-    *dash() = Dash { hwnd, list, sort, restore, empty, scale, tw, th, items: Vec::new(), loading: Vec::new() };
+    *dash() = Dash { hwnd, list, sort, restore, lang: pref, empty, scale, tw, th, items: Vec::new(), loading: Vec::new() };
     DragAcceptFiles(hwnd, 1);
     layout();
 }
@@ -2354,6 +2403,7 @@ fn main() {
             list: null_mut(),
             sort: SORT_RECENT,
             restore: true,
+            lang: None,
             empty: null_mut(),
             scale: 1.0,
             tw: 0,
