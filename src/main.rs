@@ -93,9 +93,10 @@ fn write_settings(opacity: u32) {
     let json = format!(
         "{{
   \"Opacity\": {},
-  \"DashSort\": {}
+  \"DashSort\": {},
+  \"RestoreSession\": {}
 }}",
-        opacity as f64 / 100.0, dash().sort
+        opacity as f64 / 100.0, dash().sort, dash().restore
     );
     write_atomic("settings.json", json.as_bytes());
 }
@@ -719,7 +720,7 @@ fn parse_session(text: &str) -> Vec<(String, Saved)> {
 /// Writes the open windows. Skipped while images are still loading (at startup the other windows
 /// of the last session are on their way and would be forgotten).
 fn save_session() {
-    if dash().loading.is_empty() {
+    if dash().restore && dash().loading.is_empty() {
         let lines: Vec<String> = overlays().iter().map(|&p| unsafe { window_state(&*p) }).collect();
         write_atomic("session.txt", lines.join("\n").as_bytes());
     }
@@ -1638,6 +1639,7 @@ const ISSUES_URL: &str = "https://github.com/n3d06/GIF-Overlay/issues";
 const IDC_PASTE: usize = 1009;
 const IDC_QUIT_APP: usize = 1010;
 const IDC_UPDATE: usize = 1012;
+const IDC_RESTORE: usize = 1014;
 const IDC_WIN_MIN: usize = 1020;
 const IDC_WIN_RESTORE: usize = 1021;
 const IDC_WIN_CLOSE: usize = 1022;
@@ -1671,6 +1673,7 @@ struct Dash {
     hwnd: HWND,
     list: HWND,
     sort: u8, // one of the SORT_* values (the View menu order)
+    restore: bool, // reopen the last session's windows at start (File menu)
     empty: HWND,
     scale: f32, // DPI / 96
     tw: usize,  // thumbnail size in pixels
@@ -2027,6 +2030,18 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             refresh_dash();
             0
         }
+        WM_COMMAND if wp & 0xFFFF == IDC_RESTORE => {
+            let d = dash();
+            d.restore = !d.restore;
+            CheckMenuItem(GetMenu(hwnd), IDC_RESTORE as u32, MF_BYCOMMAND | if d.restore { MF_CHECKED } else { MF_UNCHECKED });
+            write_settings(saved_opacity()); // remember the choice
+            if d.restore {
+                save_session(); // the windows open right now are the ones to bring back
+            } else {
+                let _ = fs::remove_file(exe_file("session.txt")); // no stale session if it is turned on later
+            }
+            0
+        }
         WM_COMMAND if wp & 0xFFFF == IDC_PASTE => {
             paste();
             0
@@ -2193,7 +2208,7 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
 }
 
 /// Menu bar of the dashboard: File / View / Help. Commands reuse the old button ids.
-unsafe fn build_menu(hwnd: HWND, sort: u8) {
+unsafe fn build_menu(hwnd: HWND, sort: u8, restore: bool) {
     let bar = CreateMenu();
     let (file, view, help) = (CreatePopupMenu(), CreatePopupMenu(), CreatePopupMenu());
     let add = |m: HMENU, flags: u32, id: usize, text: &str| {
@@ -2203,6 +2218,7 @@ unsafe fn build_menu(hwnd: HWND, sort: u8) {
     add(file, MF_STRING, IDC_PASTE, "Paste image or link\tCtrl+V");
     add(file, MF_SEPARATOR, 0, "");
     add(file, MF_STRING, IDC_CLEAR, "Clear history");
+    add(file, MF_STRING | if restore { MF_CHECKED } else { 0 }, IDC_RESTORE, "Reopen windows on start");
     add(file, MF_SEPARATOR, 0, "");
     add(file, MF_STRING, IDC_QUIT_APP, "Quit GIF Overlay");
     add(view, MF_STRING, IDM_SORT_RECENT, "Sort by recently opened");
@@ -2262,11 +2278,13 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
         .and_then(|v| v.parse::<u8>().ok())
         .filter(|&v| v <= SORT_SIZE_ASC)
         .unwrap_or(SORT_RECENT);
-    build_menu(hwnd, sort);
+    let settings = fs::read_to_string(exe_file("settings.json")).unwrap_or_default();
+    let restore = json_val(&settings, "RestoreSession").is_none_or(|v| v != "false"); // on unless turned off
+    build_menu(hwnd, sort, restore);
 
     let (tw, th) = (s(144.0) as usize, s(112.0) as usize);
     SendMessageW(list, LVM_SETICONSPACING, 0, ((th as isize + s(60.0) as isize) << 16) | (tw as isize + s(28.0) as isize));
-    *dash() = Dash { hwnd, list, sort, empty, scale, tw, th, items: Vec::new(), loading: Vec::new() };
+    *dash() = Dash { hwnd, list, sort, restore, empty, scale, tw, th, items: Vec::new(), loading: Vec::new() };
     DragAcceptFiles(hwnd, 1);
     layout();
 }
@@ -2335,6 +2353,7 @@ fn main() {
             hwnd: null_mut(),
             list: null_mut(),
             sort: SORT_RECENT,
+            restore: true,
             empty: null_mut(),
             scale: 1.0,
             tw: 0,
@@ -2351,7 +2370,7 @@ fn main() {
 
         // "Open With" / command line goes straight to an overlay; a bare launch shows the history.
         // The windows that were open when the app last quit come back first.
-        let last = parse_session(&fs::read_to_string(exe_file("session.txt")).unwrap_or_default());
+        let last = if dash().restore { parse_session(&fs::read_to_string(exe_file("session.txt")).unwrap_or_default()) } else { Vec::new() };
         let last: Vec<_> = last.into_iter().filter(|(p, _)| fs::metadata(p).is_ok()).take(WIN_MAX).collect();
         for (p, s) in &last {
             start_load_with(p, null_mut(), Some(*s));
