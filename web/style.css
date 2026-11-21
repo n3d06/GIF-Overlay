@@ -1,92 +1,100 @@
+/* Light-only, matches the app: white window, system Segoe UI, flat Win10/11 buttons. */
 :root {
-  --bg: #ffffff;
-  --text: #1f2328;
-  --muted: #59636e;
-  --line: #d8dee4;
-  --accent: #0969da;
-  --accent-text: #ffffff;
-  color-scheme: light dark;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0d1117;
-    --text: #e6edf3;
-    --muted: #9198a1;
-    --line: #30363d;
-    --accent: #4493f8;
-    --accent-text: #0d1117;
-  }
+  --face: #ffffff;
+  --desktop: #f0f0f0;
+  --text: #000;
+  --muted: #6d6d6d;
+  --line: #d9d9d9;
+  color-scheme: light;
 }
 
 * { box-sizing: border-box; }
 
+html { background: var(--desktop); }
+
 body {
-  max-inline-size: 42rem;
-  margin: 0 auto;
-  padding: 1.5rem 1.25rem 3rem;
-  background: var(--bg);
+  max-inline-size: 44rem;
+  margin: 1.5rem auto;
+  background: var(--face);
   color: var(--text);
-  font: 1rem/1.6 system-ui, "Segoe UI", sans-serif;
+  font: 14px/1.5 "Segoe UI", Tahoma, sans-serif;
+  border: 1px solid #b0b0b0;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .18);
 }
 
-a { color: var(--accent); }
+a { color: #0067c0; }
 h1, h2, p, ul { margin: 0; }
 
+/* title bar (light, like the app window) */
 .top {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-block-end: 1rem;
+  padding: .4rem .75rem;
+  background: #f3f3f3;
   border-block-end: 1px solid var(--line);
+  font-size: .9rem;
 }
-.top a { text-decoration: none; }
+.top a { color: #000; text-decoration: none; }
+.top a:hover { text-decoration: underline; }
+
+main, footer { margin: .75rem; }
 
 .intro {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 1.5rem;
-  padding-block: 2.5rem;
+  gap: 1.25rem;
+  padding: 1rem;
 }
 .intro > div { flex: 1 1 18rem; }
 .intro img { max-inline-size: 100%; block-size: auto; }
 
 h1 {
-  font-size: clamp(1.6rem, 1.2rem + 2vw, 2.25rem);
+  font-size: clamp(1.4rem, 1.1rem + 1.6vw, 1.9rem);
+  font-weight: 600;
   line-height: 1.2;
   text-wrap: balance;
 }
-.intro p { margin-block-start: .75rem; text-wrap: pretty; }
-.intro .actions { margin-block-start: 1.5rem; }
+.intro p { margin-block-start: .6rem; text-wrap: pretty; }
+.intro .actions { margin-block-start: 1.25rem; }
 
+/* standard Win10/11 push button */
 .button {
   display: inline-block;
-  padding: .6rem 1.1rem;
-  border-radius: 6px;
-  background: var(--accent);
-  color: var(--accent-text);
-  font-weight: 600;
+  padding: .3rem 1.4rem;
+  background: #e1e1e1;
+  color: #000;
   text-decoration: none;
+  border: 1px solid #adadad;
 }
-.button:hover { opacity: .9; }
+.button:hover { background: #e5f1fb; border-color: #0078d7; }
+.button:active { background: #cce4f7; border-color: #005499; }
 
-.small { color: var(--muted); font-size: .9rem; }
+.small { color: var(--muted); font-size: .85rem; }
 
-section + section { padding-block-start: 1.5rem; border-block-start: 1px solid var(--line); }
-h2 { font-size: 1.15rem; margin-block-end: .75rem; }
+section + section {
+  margin-block-start: 1rem;
+  padding: 1rem;
+  border-block-start: 1px solid var(--line);
+}
+h2 { font-size: 1rem; font-weight: 600; margin-block-end: .5rem; }
 ul { padding-inline-start: 1.25rem; }
-li + li { margin-block-start: .35rem; }
-section > .small { margin-block-start: 1.25rem; }
+li + li { margin-block-start: .25rem; }
+section > .small { margin-block-start: 1rem; }
 
 footer {
   display: flex;
   flex-wrap: wrap;
-  gap: .5rem 1.25rem;
-  margin-block-start: 3rem;
-  padding-block-start: 1rem;
+  gap: .25rem 1.25rem;
+  margin-block-start: 1rem;
+  padding: .5rem .25rem 0;
   border-block-start: 1px solid var(--line);
-  font-size: .9rem;
+  font-size: .85rem;
 }
 
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+:focus-visible { outline: 1px dotted #000; outline-offset: 2px; }
+
+@media (max-width: 46rem) {
+  body { margin: 0; border: 0; box-shadow: none; }
+}
