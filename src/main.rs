@@ -192,13 +192,20 @@ fn open_dialog(owner: HWND) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..len]))
 }
 
-/// First file of a WM_DROPFILES message.
-unsafe fn dropped_file(wp: WPARAM) -> Option<String> {
+/// Files of a WM_DROPFILES message (at most 10, so a careless drop cannot spawn hundreds of decodes).
+unsafe fn dropped_files(wp: WPARAM) -> Vec<String> {
     let hdrop = wp as HDROP;
-    let mut buf = [0u16; 1024];
-    let n = DragQueryFileW(hdrop, 0, buf.as_mut_ptr(), buf.len() as u32) as usize;
+    let count = DragQueryFileW(hdrop, u32::MAX, null_mut(), 0).min(10);
+    let mut out = Vec::new();
+    for i in 0..count {
+        let mut buf = [0u16; 1024];
+        let n = DragQueryFileW(hdrop, i, buf.as_mut_ptr(), buf.len() as u32) as usize;
+        if n > 0 {
+            out.push(String::from_utf16_lossy(&buf[..n]));
+        }
+    }
     DragFinish(hdrop);
-    (n > 0).then(|| String::from_utf16_lossy(&buf[..n]))
+    out
 }
 
 // =====================================================================
@@ -827,7 +834,7 @@ unsafe fn read_clipboard() -> Option<Clip> {
         }
         if IsClipboardFormatAvailable(CF_UNICODETEXT) != 0 {
             let b = clip_bytes(GetClipboardData(CF_UNICODETEXT))?;
-            let u: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&c| c != 0).collect();
+            let u: Vec<u16> = b.chunks(2).filter(|c| c.len() == 2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&c| c != 0).collect();
             let t = String::from_utf16_lossy(&u).trim().trim_matches('"').to_string();
             if (t.starts_with("http://") || t.starts_with("https://")) && !t.contains(char::is_whitespace) {
                 return Some(Clip::Url(t));
@@ -917,8 +924,8 @@ fn copy_image(a: &App) {
     }
     for p in f {
         let al = p >> 24;
-        let c = |s: u32| ((p >> s) & 0xFF) as u32;
-        let un = |s: u32| if al == 0 { 0 } else { ((c(s) * 255 + al / 2) / al).min(255) as u8 }; // premultiplied -> straight
+        let c = |s: u32| (p >> s) & 0xFF;
+        let un = |s: u32| (c(s) * 255 + al / 2).checked_div(al).map_or(0, |v| v.min(255) as u8); // premultiplied -> straight
         rgba.extend_from_slice(&[un(16), un(8), un(0), al as u8]);
     }
     for row in f.chunks(w).rev() {
@@ -1323,8 +1330,8 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         }
         WM_DROPFILES => {
             // dropping on an overlay swaps its image; the dashboard is where new windows are opened
-            if let Some(p) = dropped_file(wp) {
-                start_load(&p, a.hwnd);
+            if let Some(p) = dropped_files(wp).first() {
+                start_load(p, a.hwnd);
             }
             0
         }
@@ -1918,7 +1925,7 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             GetSysColorBrush(COLOR_WINDOW) as LRESULT
         }
         WM_DROPFILES => {
-            if let Some(p) = dropped_file(wp) {
+            for p in dropped_files(wp) {
                 open_gif(&p);
             }
             0

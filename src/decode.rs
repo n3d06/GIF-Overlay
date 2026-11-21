@@ -246,6 +246,26 @@ fn decode_gif(path: &str, max: usize) -> Result<Decoded, String> {
 mod tests {
     use super::*;
 
+    /// Frame 1 paints a red 2x2 canvas and is disposed to background; frame 2 is one transparent
+    /// pixel, which must leave the (now cleared) canvas alone. Delay 0 reads as 100ms.
+    #[test]
+    fn gif_dispose_and_transparency() {
+        let path = std::env::temp_dir().join("gif_overlay_test.gif");
+        {
+            let mut enc = gif::Encoder::new(fs::File::create(&path).unwrap(), 2, 2, &[255, 0, 0, 0, 0, 0]).unwrap();
+            let mut f1 = gif::Frame { width: 2, height: 2, buffer: vec![0, 0, 0, 0].into(), dispose: gif::DisposalMethod::Background, ..Default::default() };
+            f1.delay = 0;
+            enc.write_frame(&f1).unwrap();
+            let f2 = gif::Frame { width: 1, height: 1, buffer: vec![1].into(), transparent: Some(1), delay: 5, ..Default::default() };
+            enc.write_frame(&f2).unwrap();
+        }
+        let (gw, gh, frames, delays) = decode(path.to_str().unwrap(), usize::MAX).unwrap();
+        assert_eq!((gw, gh, frames.len(), delays.clone()), (2, 2, 2, vec![100, 50]));
+        assert_eq!(frames[0], vec![0xFFFF_0000; 4]);
+        assert_eq!(frames[1], vec![0; 4]);
+        let _ = fs::remove_file(path);
+    }
+
     /// Two-frame APNG: red 2x2 canvas, then a half-transparent blue pixel blended over (0,0).
     #[test]
     fn apng_composites_frames() {
