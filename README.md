@@ -58,7 +58,7 @@ winget install gifoverlay
     - **Always on Top**, **Pause / Play (Space)** (only for animations).
     - **Close window (Esc):** Close this window. Closing the last one quits unless the dashboard is showing.
     - **Quit GIF Overlay:** Close every window.
-- **Keys:** `Esc` close, `Space` pause, `Up` / `Down` opacity, `Ctrl+C` copy the image, `Ctrl+V` paste, `Ctrl+O` add images.
+- **Keys:** `Esc` close, `Space` pause, `Left` / `Right` previous / next frame, `-` / `+` GIF speed (0.25x to 4x, also in the right-click menu), hover an animation for the frame counter and progress bar, `Up` / `Down` opacity, `Ctrl+C` copy the image, `Ctrl+V` paste, `Ctrl+O` add images.
 - **Dashboard right-click:** on a thumbnail - Open, Show in folder, Copy path, Remove; on empty space - Add image, Paste.
 
 ## 🛠 Development
