@@ -3,9 +3,11 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Column of `ROWS` for each language, also the order of the View > Language menu.
-pub const CODES: [&str; 10] = ["en", "vi", "zh", "ja", "ko", "es", "fr", "de", "pt", "ru"];
-pub const NAMES: [&str; 10] = ["English", "Tiếng Việt", "简体中文", "日本語", "한국어", "Español", "Français", "Deutsch", "Português", "Русский"];
+use crate::lang_extra::EXTRA;
+
+/// Column of `ROWS` (then of `EXTRA`) for each language, also the order of the View > Language menu.
+pub const CODES: [&str; 18] = ["en", "vi", "zh", "ja", "ko", "es", "fr", "de", "pt", "ru", "zht", "id", "tr", "it", "pl", "uk", "th", "hi"];
+pub const NAMES: [&str; 18] = ["English", "Tiếng Việt", "简体中文", "日本語", "한국어", "Español", "Français", "Deutsch", "Português", "Русский", "繁體中文", "Bahasa Indonesia", "Türkçe", "Italiano", "Polski", "Українська", "ไทย", "हिन्दी"];
 
 static CUR: AtomicUsize = AtomicUsize::new(0);
 
@@ -15,9 +17,12 @@ pub fn set(i: usize) {
 
 /// Language for a Windows LANGID (the system's display language): the primary language id picks the column.
 pub fn detect(langid: u16) -> usize {
+    if matches!(langid, 0x0404 | 0x0C04 | 0x1404 | 0x7C04) {
+        return 10; // Traditional Chinese: Taiwan, Hong Kong, Macao, zh-CHT
+    }
     match langid & 0x3FF {
         0x2A => 1,
-        0x04 => 2, // every Chinese variant reads the Simplified texts
+        0x04 => 2, // the other Chinese variants read the Simplified texts
         0x11 => 3,
         0x12 => 4,
         0x0A => 5,
@@ -25,6 +30,13 @@ pub fn detect(langid: u16) -> usize {
         0x07 => 7,
         0x16 => 8,
         0x19 => 9,
+        0x21 => 11,
+        0x1F => 12,
+        0x10 => 13,
+        0x15 => 14,
+        0x22 => 15,
+        0x1E => 16,
+        0x39 => 17,
         _ => 0,
     }
 }
@@ -34,7 +46,9 @@ pub fn t(s: &str) -> String {
     if i == 0 {
         return s.to_string();
     }
-    ROWS.iter().find(|r| r[0] == s).map_or(s, |r| r[i]).to_string()
+    let Some(n) = ROWS.iter().position(|r| r[0] == s) else { return s.to_string() };
+    let text = if i < 10 { ROWS[n][i] } else { EXTRA[n][i - 9] }; // EXTRA starts with the English key
+    text.to_string()
 }
 
 /// `t` for a text with `{}` placeholders, filled in order with `args`.
@@ -167,6 +181,21 @@ mod tests {
         }
     }
 
+    /// `EXTRA` lines up with `ROWS` (same English key per row) and is held to the same rules.
+    #[test]
+    fn extra_rows_line_up() {
+        assert_eq!(EXTRA.len(), ROWS.len());
+        for (n, r) in EXTRA.iter().enumerate() {
+            assert_eq!(r[0], ROWS[n][0], "row {n} is out of order");
+            for (i, text) in r.iter().enumerate() {
+                assert!(!text.is_empty(), "row {n} ({}) has no {}", r[0], CODES[i + 9]);
+                assert_eq!(text.matches("{}").count(), r[0].matches("{}").count(), "placeholders: {} / {}", r[0], CODES[i + 9]);
+                assert_eq!(text.contains('\t'), r[0].contains('\t'), "tab shortcut: {} / {}", r[0], CODES[i + 9]);
+                assert_eq!(text.contains('\n'), r[0].contains('\n'), "line break: {} / {}", r[0], CODES[i + 9]);
+            }
+        }
+    }
+
     #[test]
     fn lookup_and_fill() {
         set(1);
@@ -177,6 +206,8 @@ mod tests {
         assert_eq!(tf("Version {} / {}", &["a", "b"]), "Version a / b");
         assert_eq!(detect(0x042A), 1); // vi-VN
         assert_eq!(detect(0x0804), 2); // zh-CN
+        assert_eq!(detect(0x0404), 10); // zh-TW
+        assert_eq!(detect(0x0415), 14); // pl-PL
         assert_eq!(detect(0x0409), 0); // en-US
     }
 }
