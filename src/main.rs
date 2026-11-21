@@ -52,6 +52,9 @@ const ID_SCALE: usize = 100; // + index into SCALES
 const ID_OPACITY: usize = 200; // + index into OPACITIES
 const SCALES: [u32; 7] = [25, 50, 75, 100, 150, 200, 300];
 const OPACITIES: [u32; 10] = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+const ID_SPEED: usize = 300; // + index into SPEEDS
+const SPEEDS: [f32; 6] = [0.25, 0.5, 1.0, 1.5, 2.0, 4.0];
+const SPEED_NORMAL: usize = 2; // index of 1x
 const HISTORY_MAX: usize = 30;
 
 // ---------- shared helpers ----------
@@ -241,6 +244,7 @@ struct App {
     drag: Option<(Zone, i32, i32, i32, i32)>, // zone, start cursor x, y, start width, height
     path: String, // absolute path of the image shown (lets the dashboard mark / reuse open windows)
     restore: Option<(i32, i32, i32, i32)>, // x, y, w, h before "maximize"
+    speed: usize, // index into SPEEDS
 }
 
 /// Resize handles: the corner keeps the aspect ratio, the edges change one axis only.
@@ -431,6 +435,9 @@ fn render(a: &App) {
                     }
                 }
             }
+            if a.hover && a.frames.len() > 1 {
+                draw_progress(a, dst);
+            }
             // top-right buttons (hidden when locked): minimize | maximize | close, each a dark square
             // with a white icon; the one under the cursor is highlighted (red for close)
             if a.hover && !a.locked {
@@ -478,6 +485,76 @@ fn render(a: &App) {
     }
 }
 
+/// 3x5 pixel glyphs (one row per entry, 3 bits each) for the frame counter.
+fn glyph(c: char) -> [u8; 5] {
+    match c {
+        '0' => [7, 5, 5, 5, 7],
+        '1' => [2, 6, 2, 2, 7],
+        '2' => [7, 1, 7, 4, 7],
+        '3' => [7, 1, 7, 1, 7],
+        '4' => [5, 5, 7, 1, 1],
+        '5' => [7, 4, 7, 1, 7],
+        '6' => [7, 4, 7, 5, 7],
+        '7' => [7, 1, 1, 1, 1],
+        '8' => [7, 5, 7, 5, 7],
+        '9' => [7, 5, 7, 1, 7],
+        '/' => [1, 1, 2, 4, 4],
+        '.' => [0, 0, 0, 0, 2],
+        'x' => [0, 5, 2, 5, 0],
+        _ => [0; 5],
+    }
+}
+
+/// Frame counter ("3/12", plus the speed when it is not 1x) and a progress bar along the top edge.
+fn draw_progress(a: &App, dst: &mut [u32]) {
+    let (w, h) = (a.w as usize, a.h as usize);
+    let k = dpi_px(a, 2).max(2) as usize; // size of one font pixel
+    let t = (edge(a) / 2).max(3) as usize;
+    let n = a.frames.len();
+    let mut text = format!("{}/{}", a.cur + 1, n);
+    if a.speed != SPEED_NORMAL {
+        text += &format!(" {}x", SPEEDS[a.speed]);
+    }
+    let (tw, th) = (text.chars().count() * 4 * k - k, 5 * k);
+    if w < t + tw + 6 * k + 3 * btn(a) as usize || h < t + 2 * k + th + 4 * k {
+        return; // too small to show anything without covering the buttons
+    }
+    let bar_w = w - 2 * t;
+    for y in t..t + k {
+        for x in 0..bar_w {
+            dst[y * w + t + x] = if x < bar_w * (a.cur + 1) / n { 0xFF3B_82F6 } else { 0x8080_8080 };
+        }
+    }
+    let (x0, y0) = (t + 2 * k, t + 3 * k);
+    for y in y0 - k..y0 + th + k {
+        dst[y * w + x0 - 2 * k..y * w + x0 + tw + 2 * k].fill(0xB000_0000); // dark chip
+    }
+    for (i, c) in text.chars().enumerate() {
+        for (row, bits) in glyph(c).iter().enumerate() {
+            for col in 0..3 {
+                if bits >> (2 - col) & 1 != 0 {
+                    for dy in 0..k {
+                        let start = (y0 + row * k + dy) * w + x0 + (i * 4 + col) * k;
+                        dst[start..start + k].fill(0xFFFF_FFFF);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Steps one frame (wraps around) and pauses, so the frames can be inspected one by one.
+fn step_frame(a: &mut App, forward: bool) {
+    let n = a.frames.len();
+    if n < 2 {
+        return;
+    }
+    a.paused = true;
+    a.cur = if forward { (a.cur + 1) % n } else { (a.cur + n - 1) % n };
+    schedule_frame(a); // paused: just stops the timer
+    render(a);
+}
+
 fn schedule_save(a: &App) {
     unsafe { SetTimer(a.hwnd, T_SAVE, 500, None) }; // re-arming resets the debounce
 }
@@ -485,7 +562,8 @@ fn schedule_save(a: &App) {
 fn schedule_frame(a: &App) {
     unsafe {
         if a.frames.len() > 1 && !a.paused {
-            SetTimer(a.hwnd, T_FRAME, a.delays[a.cur], None);
+            let ms = (a.delays[a.cur] as f32 / SPEEDS[a.speed]).round().max(10.0) as u32;
+            SetTimer(a.hwnd, T_FRAME, ms, None);
         } else {
             KillTimer(a.hwnd, T_FRAME);
         }
@@ -576,6 +654,7 @@ fn apply(a: &mut App, path: &str, (gw, gh, frames, delays): Decoded) {
     a.flip_h = false;
     a.flip_v = false;
     a.paused = false;
+    a.speed = SPEED_NORMAL;
     a.path = path.to_string();
     a.restore = None;
     (a.w, a.h) = fit_size(a);
@@ -617,6 +696,7 @@ fn create_overlay(path: &str, d: Decoded) {
             drag: None,
             path: String::new(),
             restore: None,
+            speed: SPEED_NORMAL,
         }));
         let hwnd = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_APPWINDOW,
@@ -1127,6 +1207,11 @@ fn command(a: &mut App, id: usize) {
             let s = SCALES[i - ID_SCALE] as f64 / 100.0;
             resize(a, (nw * s).round() as i32, (nh * s).round() as i32);
         }
+        i if (ID_SPEED..ID_SPEED + SPEEDS.len()).contains(&i) => {
+            a.speed = i - ID_SPEED;
+            schedule_frame(a);
+            render(a);
+        }
         i if (ID_OPACITY..ID_OPACITY + OPACITIES.len()).contains(&i) => {
             a.opacity = OPACITIES[i - ID_OPACITY];
             render(a);
@@ -1147,6 +1232,7 @@ fn context_menu(hwnd: HWND) {
         let Some(a) = app_of(hwnd) else { return };
         let (opacity, locked, flip_h, flip_v, paused) = (a.opacity, a.locked, a.flip_h, a.flip_v, a.paused);
         let animated = a.frames.len() > 1;
+        let speed = a.speed;
         let topmost = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST as isize != 0;
         let add =|m: HMENU, flags: u32, id: usize, text: &str| {
             AppendMenuW(m, flags, id, wide(text).as_ptr());
@@ -1181,7 +1267,12 @@ fn context_menu(hwnd: HWND) {
         add(menu, MF_POPUP, settings as usize, "Settings");
         add(menu, MF_STRING | check(topmost), ID_TOPMOST, "Always on Top");
         if animated {
+            let spd = CreatePopupMenu();
+            for (i, s) in SPEEDS.iter().enumerate() {
+                add(spd, MF_STRING | check(speed == i), ID_SPEED + i, &format!("{s}x"));
+            }
             add(menu, MF_STRING | check(paused), ID_PAUSE, "Pause / Play\tSpace");
+            add(menu, MF_POPUP, spd as usize, "Speed\t- / +");
         }
         add(menu, MF_SEPARATOR, 0, "");
         add(menu, MF_STRING, ID_EXIT, "Close window\tEsc");
@@ -1324,6 +1415,12 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                     return 0;
                 }
                 VK_SPACE if first && a.frames.len() > 1 => command(a, ID_PAUSE),
+                0x25 | 0x27 => step_frame(a, wp == 0x27), // Left / Right: previous / next frame
+                0xBD | 0xBB | 0x6D | 0x6B if a.frames.len() > 1 => {
+                    // - / + (main row or numpad): slower / faster
+                    let up = matches!(wp, 0xBB | 0x6B);
+                    command(a, ID_SPEED + if up { (a.speed + 1).min(SPEEDS.len() - 1) } else { a.speed.saturating_sub(1) });
+                }
                 VK_UP | VK_DOWN => {
                     let step = if wp as u16 == VK_UP { 10 } else { -10 };
                     a.opacity = (a.opacity as i32 + step).clamp(10, 100) as u32;
@@ -1801,7 +1898,7 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 \u{2022} Maximize stretches the image over the whole screen; click it again to restore.\n\
                 \u{2022} Drop another file on the image to replace it.\n\
                 \u{2022} Right-click for the menu: scale, opacity, rotate / flip, pause, lock, always on top, copy image, show in folder, replace image, dashboard, close and quit.\n\
-                \u{2022} Keys: Esc closes, Space pauses, Up / Down change the opacity, Ctrl+C copies the image.\n\n\
+                \u{2022} Keys: Esc closes, Space pauses, Left / Right step one frame, - / + change the speed, Up / Down change the opacity, Ctrl+C copies the image.\n\n\
                 LOCK WINDOW\n\
                 \u{2022} A locked image is click-through, so it never gets in the way.\n\
                 \u{2022} To unlock it, hold Ctrl and click the image.\n\n\
