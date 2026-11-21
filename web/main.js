@@ -16,23 +16,3 @@ fetch(`https://api.github.com/repos/${REPO}/releases/latest`)
       `${parts.filter(Boolean).join(' · ')} · Windows 10 / 11 · MIT licensed`;
   })
   .catch(() => {});
-
-const status = document.getElementById('copy-status');
-document.getElementById('copy').addEventListener('click', async (e) => {
-  const button = e.currentTarget;
-  const code = document.getElementById('winget');
-  try {
-    await navigator.clipboard.writeText(code.textContent);
-    button.textContent = 'Copied';
-    status.textContent = 'Copied';
-  } catch {
-    // clipboard blocked: select the command so Ctrl+C works
-    getSelection().selectAllChildren(code);
-    button.textContent = 'Press Ctrl+C';
-    status.textContent = 'Copy failed. The command is selected; press Control C to copy it.';
-  }
-  setTimeout(() => {
-    button.textContent = 'Copy';
-    status.textContent = '';
-  }, 1800);
-});

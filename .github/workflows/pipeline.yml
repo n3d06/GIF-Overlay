@@ -3,7 +3,7 @@ name: CI/CD Pipeline
 on:
   pull_request:
     paths-ignore: ['web/**', '**/*.md', 'LICENSE']
-  # Run manually on main to cut a release: tag -> build -> installer -> GitHub Release -> WinGet
+  # Run manually on main to cut a release: tag -> build -> installer -> GitHub Release
   workflow_dispatch:
     inputs:
       release_notes:
@@ -118,17 +118,3 @@ jobs:
             dist/GIF-Overlay-Portable.zip
             dist/GIF-Overlay-Setup-x64.exe
             dist/SHA256SUMS.txt
-
-  # 4. Submit the new version to WinGet (needs the WINGET_TOKEN secret: a classic PAT with
-  #    public_repo, owned by an account that has a fork of microsoft/winget-pkgs)
-  publish-winget:
-    needs: [create-tag, create-release]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Publish to WinGet
-        uses: vedantmgoyal9/winget-releaser@v2
-        with:
-          identifier: duyxyz.GIF-Overlay
-          installers-regex: 'Setup-x64\.exe$'
-          release-tag: ${{ needs.create-tag.outputs.new_tag }}
-          token: ${{ secrets.WINGET_TOKEN }}
