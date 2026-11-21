@@ -13,6 +13,7 @@
 - **Native Rust + Win32:** A tiny (under 1 MB) single exe, no runtime required.
 - **Single Instance:** Launching the exe again (or "Open With" on another file) reuses the running app: it brings the dashboard to the front, or opens the file in a new window.
 - **History Dashboard:** Launching the app directly (with no windows to restore) opens a dashboard of the images you opened before (empty on first run). Double-click an item to open it in a new window (you can have several open at once), `Add image` or drag one or more files in (up to 10 at once) to add them, press Delete or right-click to remove it. "Open With" skips the dashboard.
+- **Hide / show everything:** `Ctrl+Alt+G` (works from any app) hides every image window and brings them back; also under Window > Hide / show all windows.
 - **Languages:** English, Tiếng Việt, 简体中文, 繁體中文, 日本語, 한국어, Español, Français, Deutsch, Italiano, Português, Русский, Українська, Polski, Türkçe, Bahasa Indonesia, ไทย and हिन्दी. The app starts in the display language of Windows (English when it is not one of these); change it any time under View > Language. A text with no translation shows in English.
 - **Session restore:** the images that were open when you quit come back at the next start, each with its position, size, opacity, lock, rotation and flips (saved in `session.txt` next to the exe). When none were open, the dashboard opens instead. Turn it off with File > Reopen windows on start.
     - A File / View / Window / Help menu bar holds Add image, Paste, Clear history, Sort, the list of open images (with Minimize all, Restore all, Close all windows), How to use, Set as default viewer and Report a bug.
@@ -60,7 +61,7 @@ winget install gifoverlay
     - **Always on Top**, **Pause / Play (Space)** (only for animations).
     - **Close window (Esc):** Close this window. Closing the last one quits unless the dashboard is showing.
     - **Quit GIF Overlay:** Close every window.
-- **Keys:** `Esc` close, `Space` pause, `Left` / `Right` previous / next frame, `-` / `+` GIF speed (0.25x to 4x, also in the right-click menu), hover an animation for the frame counter and progress bar, `Up` / `Down` opacity, `Ctrl+C` copy the image, `Ctrl+V` paste, `Ctrl+O` add images.
+- **Keys:** `Esc` close, `Shift` + mouse wheel opacity, `Space` pause, `Left` / `Right` previous / next frame, `-` / `+` GIF speed (0.25x to 4x, also in the right-click menu), hover an animation for the frame counter and progress bar, `Up` / `Down` opacity, `Ctrl+C` copy the image, `Ctrl+V` paste, `Ctrl+O` add images.
 - **Dashboard right-click:** on a thumbnail - Open, Show in folder, Copy path, Remove; on empty space - Add image, Paste.
 
 ## 🛠 Development
