@@ -9,7 +9,6 @@ use std::{
 };
 mod decode;
 mod lang;
-mod lang_extra;
 use lang::{t as tr, tf as trf};
 use decode::{decode, Decoded};
 use windows_sys::Win32::{
