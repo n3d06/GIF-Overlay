@@ -39,12 +39,7 @@
 
 ### Installation
 
-**1. Via WinGet (Recommended)**
-```bash
-winget install gifoverlay
-```
-
-**2. Manual Download**
+**Download**
 1. Download `GIF-Overlay-Setup.exe` from the [Releases](https://github.com/duyxyz/GIF-Overlay/releases) section.
 2. Run the installer to register the application.
 3. Right-click any image or `.gif` file -> **Open With** -> Select **GIF Overlay**.
