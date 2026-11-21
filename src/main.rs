@@ -57,7 +57,7 @@ const OPACITIES: [u32; 10] = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
 const ID_SPEED: usize = 300; // + index into SPEEDS
 const SPEEDS: [f32; 6] = [0.25, 0.5, 1.0, 1.5, 2.0, 4.0];
 const SPEED_NORMAL: usize = 2; // index of 1x
-const HISTORY_MAX: usize = 30;
+const HISTORY_MAX: usize = 100;
 
 // ---------- shared helpers ----------
 
