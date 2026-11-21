@@ -23,7 +23,7 @@ use windows_sys::Win32::{
     },
     UI::{
         Controls::{Dialogs::*, *}, HiDpi::*,
-        Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, 
+        Input::KeyboardAndMouse::{GetAsyncKeyState, RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, VK_CONTROL, 
             ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_SPACE, VK_UP,
         },
         Shell::*,
@@ -748,8 +748,23 @@ unsafe fn window_state(a: &App) -> String {
     session_line(&a.path, &s)
 }
 
+static HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Hides every image window, or brings them all back (Ctrl+Alt+G anywhere, or Window menu).
+fn toggle_all() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let hide = !HIDDEN.load(Relaxed) && !overlays().is_empty();
+    for &p in overlays().iter() {
+        unsafe { ShowWindow((*p).hwnd, if hide { SW_HIDE } else { SW_SHOWNA }) };
+    }
+    HIDDEN.store(hide, Relaxed);
+}
+
 /// Opens an already decoded image in a new overlay window; `state` puts it back as it was.
 fn create_overlay(path: &str, d: Decoded, state: Option<&Saved>) {
+    if HIDDEN.load(std::sync::atomic::Ordering::Relaxed) {
+        toggle_all(); // a new window brings the hidden ones back
+    }
     let opacity = saved_opacity();
     unsafe {
         let a = Box::into_raw(Box::new(App {
@@ -1550,6 +1565,12 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             0
         }
         WM_MOUSEWHEEL => {
+            if wp & 0x4 != 0 { // MK_SHIFT: opacity
+                let step = if (wp >> 16) as i16 > 0 { 10 } else { -10 };
+                a.opacity = (a.opacity as i32 + step).clamp(10, 100) as u32;
+                render(a);
+                schedule_save(a);
+            }
             if wp & 0x8 != 0 { // MK_CONTROL
                 let k = if (wp >> 16) as i16 > 0 { 1.1 } else { 0.9 };
                 resize(a, (a.w as f64 * k).round() as i32, (a.h as f64 * k).round() as i32);
@@ -1649,6 +1670,7 @@ const IDC_RESTORE: usize = 1014;
 const IDC_WIN_MIN: usize = 1020;
 const IDC_WIN_RESTORE: usize = 1021;
 const IDC_WIN_CLOSE: usize = 1022;
+const IDC_WIN_TOGGLE: usize = 1023;
 const IDC_WIN_BASE: usize = 2000; // + index of an open image, up to WIN_MAX
 const WIN_MAX: usize = 100;
 const IDC_VERSION: usize = 1013;
@@ -2087,6 +2109,7 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             }
             AppendMenuW(m, MF_SEPARATOR, 0, null());
             let on = if names.is_empty() { MF_GRAYED } else { 0 };
+            AppendMenuW(m, MF_STRING | on, IDC_WIN_TOGGLE, wide(&tr("Hide / show all windows	Ctrl+Alt+G")).as_ptr());
             AppendMenuW(m, MF_STRING | on, IDC_WIN_MIN, wide(&tr("Minimize all")).as_ptr());
             AppendMenuW(m, MF_STRING | on, IDC_WIN_RESTORE, wide(&tr("Restore all")).as_ptr());
             AppendMenuW(m, MF_STRING | on, IDC_WIN_CLOSE, wide(&tr("Close all windows")).as_ptr());
@@ -2096,6 +2119,14 @@ unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             if let Some(&p) = overlays().get((wp & 0xFFFF) - IDC_WIN_BASE) {
                 show_overlay(&mut *p);
             }
+            0
+        }
+        WM_COMMAND if wp & 0xFFFF == IDC_WIN_TOGGLE => {
+            toggle_all();
+            0
+        }
+        WM_HOTKEY => {
+            toggle_all();
             0
         }
         WM_COMMAND if wp & 0xFFFF == IDC_WIN_MIN => {
@@ -2335,6 +2366,7 @@ unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     SendMessageW(list, LVM_SETICONSPACING, 0, ((th as isize + s(60.0) as isize) << 16) | (tw as isize + s(28.0) as isize));
     *dash() = Dash { hwnd, list, sort, restore, lang: pref, empty, scale, tw, th, items: Vec::new(), loading: Vec::new() };
     DragAcceptFiles(hwnd, 1);
+    RegisterHotKey(hwnd, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 0x47); // Ctrl+Alt+G; if another app owns it the Window menu item still works
     layout();
 }
 
