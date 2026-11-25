@@ -18,7 +18,7 @@ pub(crate) const SORT_SIZE_ASC: u8 = 4;
 
 /// The "check for updates automatically" choice and what it remembers (settings.json).
 pub(crate) struct UpdatePrefs {
-    pub(crate) auto: bool, // off unless the user turns it on: nothing is sent without that
+    pub(crate) auto: bool, // on unless the user turns it off (Help menu)
     pub(crate) last_check: u64, // day number (days since 1970) of the last successful check
     pub(crate) notified: String, // newest version the user has already been told about
 }
@@ -627,7 +627,7 @@ pub(crate) unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
         .unwrap_or(SORT_RECENT);
     let restore = json_val(&settings, "RestoreSession").is_none_or(|v| v != "false"); // on unless turned off
     let upd = UpdatePrefs {
-        auto: json_val(&settings, "AutoUpdate").is_some_and(|v| v == "true"),
+        auto: json_val(&settings, "AutoUpdate").is_none_or(|v| v != "false"),
         last_check: json_val(&settings, "LastUpdateCheck").and_then(|v| v.parse().ok()).unwrap_or(0),
         notified: json_val(&settings, "UpdateNotified").map(|v| v.trim_matches('"').to_string()).unwrap_or_default(),
     };

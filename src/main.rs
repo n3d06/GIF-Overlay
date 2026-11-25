@@ -133,7 +133,7 @@ fn main() {
             sort: SORT_RECENT,
             restore: true,
             lang: None,
-            upd: UpdatePrefs { auto: false, last_check: 0, notified: String::new() },
+            upd: UpdatePrefs { auto: true, last_check: 0, notified: String::new() },
             empty: null_mut(),
             scale: 1.0,
             tw: 0,
