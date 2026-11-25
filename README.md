@@ -10,7 +10,7 @@
 
 ## ✨ Key Features
 
-- **Native Rust + Win32:** A tiny (under 1 MB) single exe, no runtime required.
+- **Native Rust + Win32:** A tiny exe (under 1 MB) plus `gifoverlay_codec.dll` (the image decoders) next to it, no runtime required.
 - **Single Instance:** Launching the exe again (or "Open With" on another file) reuses the running app: it brings the dashboard to the front, or opens the file in a new window.
 - **History Dashboard:** Launching the app directly (with no windows to restore) opens a dashboard of the images you opened before (empty on first run). Double-click an item to open it in a new window (you can have several open at once), `Add image` or drag one or more files in (up to 10 at once) to add them, press Delete or right-click to remove it. "Open With" skips the dashboard.
 - **Hide / show everything:** `Ctrl+Alt+G` (works from any app) hides every image window and brings them back; also under Window > Hide / show all windows.

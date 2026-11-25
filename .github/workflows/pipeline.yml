@@ -28,7 +28,7 @@ jobs:
       - name: Build
         run: cargo build --release --locked
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked --workspace
 
   # 2. Create the next tag (manual run on main only, after the build passed)
   create-tag:
@@ -79,7 +79,7 @@ jobs:
           tag="${{ needs.create-tag.outputs.new_tag }}"
           ver="${tag#v}"
           # first match is the [package] version
-          sed -i "0,/^version = \".*\"/s//version = \"$ver\"/" Cargo.toml
+          sed -i "0,/^version = \".*\"/s//version = \"$ver\"/" Cargo.toml codec/Cargo.toml
           sed -i "s/^#define MyAppVersion \".*\"/#define MyAppVersion \"$ver\"/" setup_script.iss
           grep -m1 '^version' Cargo.toml
           grep -m1 'MyAppVersion' setup_script.iss
@@ -92,6 +92,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist/GIF-Overlay | Out-Null
           Copy-Item target/release/GIF-Overlay.exe dist/GIF-Overlay/
+          Copy-Item target/release/gifoverlay_codec.dll dist/GIF-Overlay/
           Compress-Archive -Path dist/GIF-Overlay/* -DestinationPath dist/GIF-Overlay-Portable.zip -Force
 
       - name: Compile setup (Inno Setup)
@@ -102,7 +103,7 @@ jobs:
       - name: Checksums
         shell: pwsh
         run: |
-          Get-FileHash dist/GIF-Overlay-Portable.zip, dist/GIF-Overlay-Setup-x64.exe, dist/GIF-Overlay/GIF-Overlay.exe -Algorithm SHA256 |
+          Get-FileHash dist/GIF-Overlay-Portable.zip, dist/GIF-Overlay-Setup-x64.exe, dist/GIF-Overlay/GIF-Overlay.exe, dist/GIF-Overlay/gifoverlay_codec.dll -Algorithm SHA256 |
             ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
             Set-Content dist/SHA256SUMS.txt
           Get-Content dist/SHA256SUMS.txt
