@@ -175,8 +175,9 @@ pub(crate) fn context_menu_dash(hwnd: HWND, lp: LPARAM) {
         };
         ClientToScreen(list, &mut pt);
         let menu = CreatePopupMenu();
+        darkmenu::begin();
         let add = |flags: u32, id: usize, text: &str| {
-            AppendMenuW(menu, flags, id, wide(&tr(text)).as_ptr());
+            darkmenu::append(menu, flags, id, &tr(text), id == IDM_OPEN);
         };
         if let Some(i) = item {
             let exists = Path::new(&dash().items[i].path).exists();
@@ -231,6 +232,8 @@ pub(crate) unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM,
             (*(lp as *mut MINMAXINFO)).ptMinTrackSize.x = (560.0 * dash().scale) as i32;
             0
         }
+        WM_MEASUREITEM if darkmenu::measure(hwnd, lp) => 1,
+        WM_DRAWITEM if darkmenu::draw(hwnd, lp) => 1,
         WM_COMMAND if wp & 0xFFFF == IDC_BUG => {
             ShellExecuteW(null_mut(), wide("open").as_ptr(), wide(ISSUES_URL).as_ptr(), null(), null(), SW_SHOWNORMAL);
             0

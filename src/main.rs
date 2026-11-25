@@ -10,6 +10,7 @@ use std::{
 mod clipboard;
 mod dashboard;
 mod decode;
+mod darkmenu;
 mod default_apps;
 mod files;
 mod history;
