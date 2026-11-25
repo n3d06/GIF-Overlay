@@ -92,10 +92,10 @@ pub(crate) struct Dash {
     pub(crate) loading: Vec<String>, // files being decoded on worker threads
 }
 
-pub(crate) static mut DASH: Option<Dash> = None;
+pub(crate) static DASH: UiCell<Option<Dash>> = UiCell::new(None);
 
 pub(crate) fn dash() -> &'static mut Dash {
-    unsafe { (*addr_of_mut!(DASH)).as_mut().unwrap() }
+    DASH.get().as_mut().unwrap()
 }
 
 pub(crate) fn refresh_dash() {

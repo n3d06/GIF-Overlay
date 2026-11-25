@@ -4,7 +4,7 @@ use std::{
     ffi::c_void,
     fs, mem,
     path::{Path, PathBuf},
-    ptr::{addr_of_mut, null, null_mut},
+    ptr::{null, null_mut},
     slice,
 };
 mod clipboard;
@@ -147,7 +147,7 @@ fn main() {
     unsafe {
         // WIC (static image decoding) needs COM on this thread
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
-        DASH = Some(Dash {
+        *DASH.get() = Some(Dash {
             hwnd: null_mut(),
             list: null_mut(),
             sort: SORT_RECENT,

@@ -39,10 +39,10 @@ pub(crate) enum Zone {
 
 // One `App` per overlay window, owned through the window's GWLP_USERDATA pointer.
 // The UI is single threaded; this list only tells us how many overlays are open.
-pub(crate) static mut OVERLAYS: Vec<*mut App> = Vec::new();
+pub(crate) static OVERLAYS: UiCell<Vec<*mut App>> = UiCell::new(Vec::new());
 
 pub(crate) fn overlays() -> &'static mut Vec<*mut App> {
-    unsafe { &mut *addr_of_mut!(OVERLAYS) }
+    OVERLAYS.get()
 }
 
 pub(crate) fn dpi_px(a: &App, v: i32) -> i32 {
