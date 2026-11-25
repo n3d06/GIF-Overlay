@@ -67,7 +67,7 @@ To build from source:
 2. Clone the repository.
 3. Build and run:
    ```bash
-   cargo run --release -- src/assets/demo1.gif
+   cargo run --release -- docs/demo1.gif
    ```
 
 ## 📜 License
