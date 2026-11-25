@@ -510,57 +510,11 @@ pub(crate) unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPAR
     let Some(a) = app_of(hwnd) else { return DefWindowProcW(hwnd, msg, wp, lp) };
     match msg {
         WM_LBUTTONDOWN => {
-            if a.locked {
-                // only reachable while Ctrl is held over a locked window (see lock_tick)
-                command(a, ID_LOCK);
-                return 0;
-            }
-            let zone = zone_at(a, lp as i16 as i32, (lp >> 16) as i16 as i32);
-            if !a.locked {
-                if zone != Zone::None {
-                    let mut pt = POINT { x: 0, y: 0 };
-                    GetCursorPos(&mut pt);
-                    a.drag = Some((zone, pt.x, pt.y, a.w, a.h));
-                    SetCapture(hwnd);
-                } else if a.restore.is_none() { // a maximized window stays put
-                    ReleaseCapture();
-                    SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as usize, 0);
-                }
-            }
+            on_button_down(a, hwnd, lp);
             0
         }
         WM_MOUSEMOVE => {
-            if let Some((Zone::Close | Zone::Max | Zone::Min, ..)) = a.drag {
-                // pressed on a button: it only fires if released still on it
-                let zone = zone_at(a, lp as i16 as i32, (lp >> 16) as i16 as i32);
-                if zone != a.hot {
-                    a.hot = zone;
-                    render(a);
-                }
-            } else if let Some((zone, mx, my, w0, h0)) = a.drag {
-                let mut pt = POINT { x: 0, y: 0 };
-                GetCursorPos(&mut pt);
-                let (nw, nh) = match zone {
-                    Zone::Right => (w0 + pt.x - mx, h0),
-                    Zone::Bottom => (w0, h0 + pt.y - my),
-                    _ => {
-                        // corner keeps the aspect ratio: follow whichever axis moved further
-                        let k = ((w0 + pt.x - mx) as f64 / w0 as f64).max((h0 + pt.y - my) as f64 / h0 as f64);
-                        ((w0 as f64 * k).round() as i32, (h0 as f64 * k).round() as i32)
-                    }
-                };
-                resize(a, nw, nh);
-            } else if !a.frames.is_empty() {
-                let zone = zone_at(a, lp as i16 as i32, (lp >> 16) as i16 as i32);
-                if !a.hover || zone != a.hot {
-                    if !a.hover {
-                        track_leave(hwnd);
-                    }
-                    a.hover = true;
-                    a.hot = zone;
-                    render(a);
-                }
-            }
+            on_mouse_move(a, hwnd, lp);
             0
         }
         WM_MOUSELEAVE => {
@@ -572,21 +526,7 @@ pub(crate) unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPAR
             0
         }
         WM_LBUTTONUP => {
-            if let Some((zone, ..)) = a.drag.take() {
-                ReleaseCapture();
-                if zone_at(a, lp as i16 as i32, (lp >> 16) as i16 as i32) == zone {
-                    match zone {
-                        Zone::Close => {
-                            command(a, ID_EXIT); // destroys the window: `a` is gone after this
-                            return 0;
-                        }
-                        Zone::Max => toggle_max(a),
-                        Zone::Min => minimize(a),
-                        _ => {}
-                    }
-                }
-                track_leave(hwnd); // the cursor may have ended up outside the window
-            }
+            on_button_up(a, hwnd, lp);
             0
         }
         WM_EXITSIZEMOVE => {
@@ -621,28 +561,7 @@ pub(crate) unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPAR
             0
         }
         WM_KEYDOWN => {
-            let first = lp & (1 << 30) == 0; // ignore auto-repeat for the one-shot keys
-            match wp as u16 {
-                VK_ESCAPE if first => {
-                    command(a, ID_EXIT); // destroys the window: `a` is gone after this
-                    return 0;
-                }
-                VK_SPACE if first && a.frames.len() > 1 => command(a, ID_PAUSE),
-                0x25 | 0x27 => step_frame(a, wp == 0x27), // Left / Right: previous / next frame
-                0xBD | 0xBB | 0x6D | 0x6B if a.frames.len() > 1 => {
-                    // - / + (main row or numpad): slower / faster
-                    let up = matches!(wp, 0xBB | 0x6B);
-                    command(a, ID_SPEED + if up { (a.speed + 1).min(SPEEDS.len() - 1) } else { a.speed.saturating_sub(1) });
-                }
-                VK_UP | VK_DOWN => {
-                    let step = if wp as u16 == VK_UP { 10 } else { -10 };
-                    a.opacity = (a.opacity as i32 + step).clamp(10, 100) as u32;
-                    render(a);
-                    schedule_save(a);
-                }
-                0x43 if first && GetAsyncKeyState(VK_CONTROL as i32) < 0 => command(a, ID_COPY), // Ctrl+C
-                _ => {}
-            }
+            on_key_down(a, wp, lp);
             0
         }
         WM_DROPFILES => {
@@ -653,52 +572,161 @@ pub(crate) unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPAR
             0
         }
         WM_MOUSEWHEEL => {
-            if wp & 0x4 != 0 { // MK_SHIFT: opacity
-                let step = if (wp >> 16) as i16 > 0 { 10 } else { -10 };
-                a.opacity = (a.opacity as i32 + step).clamp(10, 100) as u32;
-                render(a);
-                schedule_save(a);
-            }
-            if wp & 0x8 != 0 { // MK_CONTROL
-                let k = if (wp >> 16) as i16 > 0 { 1.1 } else { 0.9 };
-                resize(a, (a.w as f64 * k).round() as i32, (a.h as f64 * k).round() as i32);
-            }
+            on_mouse_wheel(a, wp);
             0
         }
         WM_TIMER => {
-            match wp {
-                T_FRAME if !a.frames.is_empty() => {
-                    a.cur = (a.cur + 1) % a.frames.len();
-                    if IsIconic(hwnd) == 0 {
-                        render(a); // a minimized window needs no redraw, just keep the animation clock running
-                    }
-                    schedule_frame(a);
-                }
-                T_LOCK => lock_tick(a),
-                T_SAVE => {
-                    KillTimer(hwnd, T_SAVE);
-                    save_settings(a);
-                }
-                _ => {}
-            }
+            on_timer(a, hwnd, wp);
             0
         }
         WM_DESTROY => {
-            let p = a as *mut App;
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-            overlays().retain(|&q| q != p);
-            save_session();
-            drop(Box::from_raw(p));
-            // closing the last image quits, unless the dashboard was opened on purpose and is still showing
-            let dash_visible = IsWindowVisible(dash().hwnd) != 0;
-            if overlays().is_empty() && !dash_visible {
-                PostQuitMessage(0);
-            } else if dash_visible {
-                refresh_dash(); // the "open" marks changed
-            }
+            on_destroy(a, hwnd);
             0
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+unsafe fn on_button_down(a: &mut App, hwnd: HWND, lp: LPARAM) {
+    if a.locked {
+        // only reachable while Ctrl is held over a locked window (see lock_tick)
+        command(a, ID_LOCK);
+        return;
+    }
+    let zone = zone_at(a, lp as i16 as i32, (lp >> 16) as i16 as i32);
+    if !a.locked {
+        if zone != Zone::None {
+            let mut pt = POINT { x: 0, y: 0 };
+            GetCursorPos(&mut pt);
+            a.drag = Some((zone, pt.x, pt.y, a.w, a.h));
+            SetCapture(hwnd);
+        } else if a.restore.is_none() { // a maximized window stays put
+            ReleaseCapture();
+            SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as usize, 0);
+        }
+    }
+}
+
+unsafe fn on_mouse_move(a: &mut App, hwnd: HWND, lp: LPARAM) {
+    if let Some((Zone::Close | Zone::Max | Zone::Min, ..)) = a.drag {
+        // pressed on a button: it only fires if released still on it
+        let zone = zone_at(a, lp as i16 as i32, (lp >> 16) as i16 as i32);
+        if zone != a.hot {
+            a.hot = zone;
+            render(a);
+        }
+    } else if let Some((zone, mx, my, w0, h0)) = a.drag {
+        let mut pt = POINT { x: 0, y: 0 };
+        GetCursorPos(&mut pt);
+        let (nw, nh) = match zone {
+            Zone::Right => (w0 + pt.x - mx, h0),
+            Zone::Bottom => (w0, h0 + pt.y - my),
+            _ => {
+                // corner keeps the aspect ratio: follow whichever axis moved further
+                let k = ((w0 + pt.x - mx) as f64 / w0 as f64).max((h0 + pt.y - my) as f64 / h0 as f64);
+                ((w0 as f64 * k).round() as i32, (h0 as f64 * k).round() as i32)
+            }
+        };
+        resize(a, nw, nh);
+    } else if !a.frames.is_empty() {
+        let zone = zone_at(a, lp as i16 as i32, (lp >> 16) as i16 as i32);
+        if !a.hover || zone != a.hot {
+            if !a.hover {
+                track_leave(hwnd);
+            }
+            a.hover = true;
+            a.hot = zone;
+            render(a);
+        }
+    }
+}
+
+unsafe fn on_button_up(a: &mut App, hwnd: HWND, lp: LPARAM) {
+    if let Some((zone, ..)) = a.drag.take() {
+        ReleaseCapture();
+        if zone_at(a, lp as i16 as i32, (lp >> 16) as i16 as i32) == zone {
+            match zone {
+                Zone::Close => {
+                    command(a, ID_EXIT); // destroys the window: `a` is gone after this
+                    return;
+                }
+                Zone::Max => toggle_max(a),
+                Zone::Min => minimize(a),
+                _ => {}
+            }
+        }
+        track_leave(hwnd); // the cursor may have ended up outside the window
+    }
+}
+
+unsafe fn on_key_down(a: &mut App, wp: WPARAM, lp: LPARAM) {
+    let first = lp & (1 << 30) == 0; // ignore auto-repeat for the one-shot keys
+    match wp as u16 {
+        VK_ESCAPE if first => {
+            command(a, ID_EXIT); // destroys the window: `a` is gone after this
+            return;
+        }
+        VK_SPACE if first && a.frames.len() > 1 => command(a, ID_PAUSE),
+        0x25 | 0x27 => step_frame(a, wp == 0x27), // Left / Right: previous / next frame
+        0xBD | 0xBB | 0x6D | 0x6B if a.frames.len() > 1 => {
+            // - / + (main row or numpad): slower / faster
+            let up = matches!(wp, 0xBB | 0x6B);
+            command(a, ID_SPEED + if up { (a.speed + 1).min(SPEEDS.len() - 1) } else { a.speed.saturating_sub(1) });
+        }
+        VK_UP | VK_DOWN => {
+            let step = if wp as u16 == VK_UP { 10 } else { -10 };
+            a.opacity = (a.opacity as i32 + step).clamp(10, 100) as u32;
+            render(a);
+            schedule_save(a);
+        }
+        0x43 if first && GetAsyncKeyState(VK_CONTROL as i32) < 0 => command(a, ID_COPY), // Ctrl+C
+        _ => {}
+    }
+}
+
+unsafe fn on_mouse_wheel(a: &mut App, wp: WPARAM) {
+    if wp & 0x4 != 0 { // MK_SHIFT: opacity
+        let step = if (wp >> 16) as i16 > 0 { 10 } else { -10 };
+        a.opacity = (a.opacity as i32 + step).clamp(10, 100) as u32;
+        render(a);
+        schedule_save(a);
+    }
+    if wp & 0x8 != 0 { // MK_CONTROL
+        let k = if (wp >> 16) as i16 > 0 { 1.1 } else { 0.9 };
+        resize(a, (a.w as f64 * k).round() as i32, (a.h as f64 * k).round() as i32);
+    }
+}
+
+unsafe fn on_timer(a: &mut App, hwnd: HWND, wp: WPARAM) {
+    match wp {
+        T_FRAME if !a.frames.is_empty() => {
+            a.cur = (a.cur + 1) % a.frames.len();
+            if IsIconic(hwnd) == 0 {
+                render(a); // a minimized window needs no redraw, just keep the animation clock running
+            }
+            schedule_frame(a);
+        }
+        T_LOCK => lock_tick(a),
+        T_SAVE => {
+            KillTimer(hwnd, T_SAVE);
+            save_settings(a);
+        }
+        _ => {}
+    }
+}
+
+unsafe fn on_destroy(a: &mut App, hwnd: HWND) {
+    let p = a as *mut App;
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+    overlays().retain(|&q| q != p);
+    save_session();
+    drop(Box::from_raw(p));
+    // closing the last image quits, unless the dashboard was opened on purpose and is still showing
+    let dash_visible = IsWindowVisible(dash().hwnd) != 0;
+    if overlays().is_empty() && !dash_visible {
+        PostQuitMessage(0);
+    } else if dash_visible {
+        refresh_dash(); // the "open" marks changed
     }
 }
 
