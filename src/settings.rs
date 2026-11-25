@@ -63,10 +63,11 @@ pub(crate) fn write_settings(opacity: u32) {
   \"Language\": \"{}\",
   \"AutoUpdate\": {},
   \"LastUpdateCheck\": {},
-  \"UpdateNotified\": \"{}\"
+  \"UpdateNotified\": \"{}\",
+  \"Theme\": \"{}\"
 }}",
         opacity as f64 / 100.0, dash().sort, dash().restore, json_escape(dash().lang.map_or("auto", |i| lang::CODES[i])),
-        dash().upd.auto, dash().upd.last_check, json_escape(&dash().upd.notified)
+        dash().upd.auto, dash().upd.last_check, json_escape(&dash().upd.notified), theme::name(theme::pref())
     );
     write_atomic("settings.json", json.as_bytes());
 }

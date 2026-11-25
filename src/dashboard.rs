@@ -175,9 +175,8 @@ pub(crate) fn context_menu_dash(hwnd: HWND, lp: LPARAM) {
         };
         ClientToScreen(list, &mut pt);
         let menu = CreatePopupMenu();
-        darkmenu::begin();
         let add = |flags: u32, id: usize, text: &str| {
-            darkmenu::append(menu, flags, id, &tr(text), id == IDM_OPEN);
+            AppendMenuW(menu, flags, id, wide(&tr(text)).as_ptr());
         };
         if let Some(i) = item {
             let exists = Path::new(&dash().items[i].path).exists();
@@ -224,7 +223,7 @@ pub(crate) unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM,
         WM_ERASEBKGND => {
             let mut r: RECT = mem::zeroed();
             GetClientRect(hwnd, &mut r);
-            FillRect(wp as HDC, &r, GetSysColorBrush(COLOR_WINDOW));
+            FillRect(wp as HDC, &r, theme::bg_brush());
             1
         }
         WM_GETMINMAXINFO => {
@@ -232,8 +231,29 @@ pub(crate) unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM,
             (*(lp as *mut MINMAXINFO)).ptMinTrackSize.x = (560.0 * dash().scale) as i32;
             0
         }
-        WM_MEASUREITEM if darkmenu::measure(hwnd, lp) => 1,
-        WM_DRAWITEM if darkmenu::draw(hwnd, lp) => 1,
+        WM_COMMAND if (IDM_THEME_BASE..=IDM_THEME_BASE + 2).contains(&(wp & 0xFFFF)) => {
+            set_theme(hwnd, ((wp & 0xFFFF) - IDM_THEME_BASE) as u8);
+            0
+        }
+        WM_SETTINGCHANGE if theme::pref() == theme::AUTO && is_color_change(lp) => {
+            reapply_theme(hwnd);
+            0
+        }
+        WM_UAHDRAWMENU if theme::dark() => {
+            theme::draw_menubar(hwnd, lp);
+            1
+        }
+        WM_UAHDRAWMENUITEM if theme::dark() => {
+            theme::draw_menu_item(lp);
+            1
+        }
+        WM_NCPAINT | WM_NCACTIVATE => {
+            let r = DefWindowProcW(hwnd, msg, wp, lp);
+            if theme::dark() {
+                theme::paint_menubar_line(hwnd);
+            }
+            r
+        }
         WM_COMMAND if wp & 0xFFFF == IDC_BUG => {
             ShellExecuteW(null_mut(), wide("open").as_ptr(), wide(ISSUES_URL).as_ptr(), null(), null(), SW_SHOWNORMAL);
             0
@@ -340,9 +360,9 @@ pub(crate) unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM,
         }
         // keep the empty-state label on the list's background
         WM_CTLCOLORSTATIC => {
-            SetBkColor(wp as HDC, GetSysColor(COLOR_WINDOW));
-            SetTextColor(wp as HDC, GetSysColor(COLOR_GRAYTEXT));
-            GetSysColorBrush(COLOR_WINDOW) as LRESULT
+            SetBkColor(wp as HDC, theme::window_bg());
+            SetTextColor(wp as HDC, theme::text_dim());
+            theme::bg_brush() as LRESULT
         }
         WM_DROPFILES => {
             for p in dropped_files(wp) {
@@ -528,7 +548,7 @@ pub(crate) unsafe fn set_language(hwnd: HWND, pref: Option<usize>) {
     let old = GetMenu(hwnd);
     SetMenu(hwnd, null_mut());
     DestroyMenu(old);
-    build_menu(hwnd, &MenuState { sort: d.sort, restore: d.restore, lang: pref, auto_update: d.upd.auto });
+    build_menu(hwnd, &MenuState { sort: d.sort, restore: d.restore, lang: pref, auto_update: d.upd.auto, theme: theme::pref() });
     SetWindowTextW(d.empty, wide(&tr(EMPTY_TEXT)).as_ptr());
     write_settings(saved_opacity()); // remember the choice
     refresh_dash(); // "(open)" labels
@@ -541,11 +561,12 @@ pub(crate) struct MenuState {
     pub(crate) restore: bool,
     pub(crate) lang: Option<usize>, // None = follow the system
     pub(crate) auto_update: bool,
+    pub(crate) theme: u8, // theme::AUTO / LIGHT / DARK
 }
 
 /// Menu bar of the dashboard: File / View / Help. Commands reuse the old button ids.
 pub(crate) unsafe fn build_menu(hwnd: HWND, m: &MenuState) {
-    let MenuState { sort, restore, lang: pref, auto_update } = *m;
+    let MenuState { sort, restore, lang: pref, auto_update, theme } = *m;
     let bar = CreateMenu();
     let (file, view, help) = (CreatePopupMenu(), CreatePopupMenu(), CreatePopupMenu());
     let add = |m: HMENU, flags: u32, id: usize, text: &str| {
@@ -571,6 +592,12 @@ pub(crate) unsafe fn build_menu(hwnd: HWND, m: &MenuState) {
     }
     CheckMenuRadioItem(langs, IDM_LANG_BASE as u32, (IDM_LANG_BASE + lang::NAMES.len()) as u32, (IDM_LANG_BASE + pref.map_or(0, |i| i + 1)) as u32, MF_BYCOMMAND);
     add(view, MF_POPUP, langs as usize, "Language");
+    let themes = CreatePopupMenu();
+    add(themes, MF_STRING, IDM_THEME_BASE + theme::AUTO as usize, "System default");
+    add(themes, MF_STRING, IDM_THEME_BASE + theme::LIGHT as usize, "Light");
+    add(themes, MF_STRING, IDM_THEME_BASE + theme::DARK as usize, "Dark");
+    CheckMenuRadioItem(themes, IDM_THEME_BASE as u32, IDM_THEME_BASE as u32 + 2, (IDM_THEME_BASE + theme as usize) as u32, MF_BYCOMMAND);
+    add(view, MF_POPUP, themes as usize, "Theme");
     add(help, MF_STRING, IDC_HOW_TO, "How to use");
     add(help, MF_STRING, IDC_DEFAULT, "Set as default viewer");
     add(help, MF_SEPARATOR, 0, "");
@@ -595,6 +622,8 @@ pub(crate) unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
     // the texts below are created in the saved language (no saved choice: the system's display language)
     let pref = json_val(&settings, "Language").and_then(|v| lang::CODES.iter().position(|c| *c == v.trim_matches('"')));
     lang::set(pref.unwrap_or_else(system_language));
+    theme::set_pref(json_val(&settings, "Theme").map_or(theme::AUTO, |v| theme::from_name(&v)));
+    theme::apply_app();
     let dpi = GetDpiForSystem();
     let scale = dpi as f32 / 96.0;
     let s = |v: f32| (v * scale) as i32;
@@ -634,13 +663,57 @@ pub(crate) unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
         last_check: json_val(&settings, "LastUpdateCheck").and_then(|v| v.parse().ok()).unwrap_or(0),
         notified: json_val(&settings, "UpdateNotified").map(|v| v.trim_matches('"').to_string()).unwrap_or_default(),
     };
-    build_menu(hwnd, &MenuState { sort, restore, lang: pref, auto_update: upd.auto });
+    build_menu(hwnd, &MenuState { sort, restore, lang: pref, auto_update: upd.auto, theme: theme::pref() });
 
     let (tw, th) = (s(144.0) as usize, s(112.0) as usize);
     SendMessageW(list, LVM_SETICONSPACING, 0, ((th as isize + s(60.0) as isize) << 16) | (tw as isize + s(28.0) as isize));
     *dash() = Dash { hwnd, list, sort, restore, lang: pref, upd, empty, scale, tw, th, items: Vec::new(), loading: Vec::new() };
+    apply_dash_theme();
     DragAcceptFiles(hwnd, 1);
     RegisterHotKey(hwnd, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 0x47); // Ctrl+Alt+G; if another app owns it the Window menu item still works
     layout();
 }
 
+
+/// Colors and themed parts of the dashboard window for the current theme (not the thumbnails).
+unsafe fn apply_dash_theme() {
+    let d = dash();
+    theme::apply_titlebar(d.hwnd);
+    SetWindowTheme(d.list, wide(if theme::dark() { "DarkMode_Explorer" } else { "Explorer" }).as_ptr(), null());
+    SendMessageW(d.list, LVM_SETBKCOLOR, 0, theme::window_bg() as isize);
+    SendMessageW(d.list, LVM_SETTEXTBKCOLOR, 0, theme::window_bg() as isize);
+    SendMessageW(d.list, LVM_SETTEXTCOLOR, 0, theme::text() as isize);
+    DrawMenuBar(d.hwnd);
+    InvalidateRect(d.hwnd, null(), 1);
+    InvalidateRect(d.list, null(), 1);
+}
+
+/// Applies the theme after it changed (menu choice, or Windows switched while following it).
+unsafe fn reapply_theme(hwnd: HWND) {
+    theme::apply_app();
+    apply_dash_theme();
+    let d = dash();
+    let old = GetMenu(hwnd);
+    SetMenu(hwnd, null_mut());
+    DestroyMenu(old);
+    build_menu(hwnd, &MenuState { sort: d.sort, restore: d.restore, lang: d.lang, auto_update: d.upd.auto, theme: theme::pref() });
+    d.items.clear(); // the thumbnails are blended onto the background color: build them again
+    refresh_dash();
+}
+
+/// View > Theme: remember the choice and apply it.
+unsafe fn set_theme(hwnd: HWND, choice: u8) {
+    theme::set_pref(choice);
+    write_settings(saved_opacity());
+    reapply_theme(hwnd);
+}
+
+/// WM_SETTINGCHANGE that says the user switched Windows between light and dark.
+unsafe fn is_color_change(lp: LPARAM) -> bool {
+    if lp == 0 {
+        return false;
+    }
+    let p = lp as *const u16;
+    let s: Vec<u16> = (0..32).map(|i| *p.add(i)).take_while(|&c| c != 0).collect();
+    String::from_utf16_lossy(&s) == "ImmersiveColorSet"
+}

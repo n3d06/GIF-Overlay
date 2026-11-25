@@ -48,6 +48,7 @@ pub(crate) const IDC_WIN_TOGGLE: usize = 1023;
 pub(crate) const IDM_SORT_RECENT: usize = 1101;
 pub(crate) const IDM_SORT_LAST: usize = 1105; // the five sort items are IDM_SORT_RECENT + the SORT_* value
 pub(crate) const IDM_LANG_BASE: usize = 1200; // "system default", then + 1 + the language index
+pub(crate) const IDM_THEME_BASE: usize = 1300; // + 0 follow Windows, + 1 light, + 2 dark
 
 // ---- dashboard: the Window menu lists the open images ----
 pub(crate) const IDC_WIN_BASE: usize = 2000; // + index of an open image, up to WIN_MAX

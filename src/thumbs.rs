@@ -32,8 +32,7 @@ pub(crate) fn make_thumb(path: &str, tw: usize, th: usize) -> Option<Thumb> {
     let (dw, dh) = (((gw as f32 * s) as usize).clamp(1, tw), ((gh as f32 * s) as usize).clamp(1, th));
     let (ox, oy) = ((tw - dw) / 2, (th - dh) / 2);
     // blend onto the list's own background so transparent GIFs look right
-    let c = unsafe { GetSysColor(COLOR_WINDOW) };
-    let bg = (c & 0xFF) << 16 | ((c >> 8) & 0xFF) << 8 | (c >> 16) & 0xFF;
+    let bg = pixel(window_bg()) & 0x00FF_FFFF;
     let mut px = vec![0xFF00_0000 | bg; tw * th];
     for y in 0..dh {
         for x in 0..dw {
@@ -62,8 +61,7 @@ pub(crate) fn make_thumb(path: &str, tw: usize, th: usize) -> Option<Thumb> {
 
 /// A blank thumbnail shown at once, so the dashboard opens without decoding any image.
 pub(crate) fn placeholder_thumb(path: &str, tw: usize, th: usize) -> Option<Thumb> {
-    let c = unsafe { GetSysColor(COLOR_WINDOW) };
-    let bg = (c & 0xFF) << 16 | ((c >> 8) & 0xFF) << 8 | (c >> 16) & 0xFF;
+    let bg = pixel(window_bg()) & 0x00FF_FFFF;
     Some(Thumb {
         path: path.to_string(),
         name: Path::new(path).file_name()?.to_string_lossy().into_owned(),
