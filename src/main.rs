@@ -13,6 +13,7 @@ mod decode;
 mod default_apps;
 mod files;
 mod history;
+mod ids;
 mod lang;
 mod loader;
 mod overlay;
@@ -30,6 +31,7 @@ pub(crate) use dashboard::*;
 pub(crate) use default_apps::*;
 pub(crate) use files::*;
 pub(crate) use history::*;
+pub(crate) use ids::*;
 pub(crate) use loader::*;
 pub(crate) use overlay::*;
 pub(crate) use render::*;
@@ -61,30 +63,8 @@ use windows_sys::Win32::{
     },
 };
 
-const T_FRAME: usize = 1;
-const T_SAVE: usize = 2;
-const T_LOCK: usize = 3;
-
-const ID_LOCK: usize = 1;
-const ID_OPEN: usize = 2;
-const ID_ROT_L: usize = 3;
-const ID_ROT_R: usize = 4;
-const ID_FLIP_H: usize = 5;
-const ID_FLIP_V: usize = 6;
-const ID_RESET: usize = 7;
-const ID_PAUSE: usize = 8;
-const ID_EXIT: usize = 9;
-const ID_HISTORY: usize = 10;
-const ID_QUIT: usize = 11;
-const ID_PASTE: usize = 12;
-const ID_COPY: usize = 13;
-const ID_FOLDER: usize = 14;
-const ID_TOPMOST: usize = 15;
-const ID_SCALE: usize = 100; // + index into SCALES
-const ID_OPACITY: usize = 200; // + index into OPACITIES
 const SCALES: [u32; 7] = [25, 50, 75, 100, 150, 200, 300];
 const OPACITIES: [u32; 10] = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
-const ID_SPEED: usize = 300; // + index into SPEEDS
 const SPEEDS: [f32; 6] = [0.25, 0.5, 1.0, 1.5, 2.0, 4.0];
 const SPEED_NORMAL: usize = 2; // index of 1x
 const HISTORY_MAX: usize = 100;

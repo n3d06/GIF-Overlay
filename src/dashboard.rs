@@ -2,49 +2,7 @@
 
 use crate::*;
 
-pub(crate) const IDC_ADD: usize = 1001;
-
-pub(crate) const IDC_DEFAULT: usize = 1003;
-
-pub(crate) const IDC_LIST: usize = 1002;
-
-pub(crate) const IDC_CLEAR: usize = 1004;
-
-pub(crate) const IDC_HELP: usize = 1006;
-
-pub(crate) const IDC_BUG: usize = 1007;
-
 pub(crate) const ISSUES_URL: &str = "https://github.com/n3d06/GIF-Overlay/issues";
-
-pub(crate) const IDC_PASTE: usize = 1009;
-
-pub(crate) const IDC_QUIT_APP: usize = 1010;
-
-pub(crate) const IDC_UPDATE: usize = 1012;
-
-pub(crate) const IDC_RESTORE: usize = 1014;
-
-pub(crate) const IDC_AUTOUPD: usize = 1015;
-
-pub(crate) const IDC_WIN_MIN: usize = 1020;
-
-pub(crate) const IDC_WIN_RESTORE: usize = 1021;
-
-pub(crate) const IDC_WIN_CLOSE: usize = 1022;
-
-pub(crate) const IDC_WIN_TOGGLE: usize = 1023;
-
-pub(crate) const IDC_WIN_BASE: usize = 2000; // + index of an open image, up to WIN_MAX
-
-pub(crate) const WIN_MAX: usize = 100;
-
-pub(crate) const IDC_VERSION: usize = 1013;
-
-pub(crate) const IDM_SORT_RECENT: usize = 1101;
-
-pub(crate) const IDM_SORT_LAST: usize = 1105; // the five sort items are IDM_SORT_RECENT + the SORT_* value
-
-pub(crate) const IDM_LANG_BASE: usize = 1200; // "system default", then + 1 + the language index
 
 pub(crate) const EMPTY_TEXT: &str = "No history yet\r\nUse File > Add image or drop an image here.";
 
@@ -57,18 +15,6 @@ pub(crate) const SORT_NAME_DESC: u8 = 2;
 pub(crate) const SORT_SIZE_DESC: u8 = 3; // largest file first
 
 pub(crate) const SORT_SIZE_ASC: u8 = 4;
-
-pub(crate) const IDM_OPEN: usize = 1;
-
-pub(crate) const IDM_REMOVE: usize = 2;
-
-pub(crate) const IDM_FOLDER: usize = 3;
-
-pub(crate) const IDM_COPYPATH: usize = 4;
-
-pub(crate) const IDM_ADD: usize = 5;
-
-pub(crate) const IDM_PASTE: usize = 6;
 
 /// The "check for updates automatically" choice and what it remembers (settings.json).
 pub(crate) struct UpdatePrefs {
@@ -289,7 +235,7 @@ pub(crate) unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM,
             ShellExecuteW(null_mut(), wide("open").as_ptr(), wide(ISSUES_URL).as_ptr(), null(), null(), SW_SHOWNORMAL);
             0
         }
-        WM_COMMAND if wp & 0xFFFF == IDC_HELP => {
+        WM_COMMAND if wp & 0xFFFF == IDC_HOW_TO => {
             // one translated line per entry; "" is a blank line between the sections
             const LINES: [&str; 20] = [
                 "OPEN AN IMAGE",
@@ -543,14 +489,24 @@ pub(crate) unsafe fn set_language(hwnd: HWND, pref: Option<usize>) {
     let old = GetMenu(hwnd);
     SetMenu(hwnd, null_mut());
     DestroyMenu(old);
-    build_menu(hwnd, d.sort, d.restore, pref, d.upd.auto);
+    build_menu(hwnd, &MenuState { sort: d.sort, restore: d.restore, lang: pref, auto_update: d.upd.auto });
     SetWindowTextW(d.empty, wide(&tr(EMPTY_TEXT)).as_ptr());
     write_settings(saved_opacity()); // remember the choice
     refresh_dash(); // "(open)" labels
 }
 
+/// What the menu bar shows checked: the View > Sort and Language choices and the two File / Help toggles.
+#[derive(Clone, Copy)]
+pub(crate) struct MenuState {
+    pub(crate) sort: u8,
+    pub(crate) restore: bool,
+    pub(crate) lang: Option<usize>, // None = follow the system
+    pub(crate) auto_update: bool,
+}
+
 /// Menu bar of the dashboard: File / View / Help. Commands reuse the old button ids.
-pub(crate) unsafe fn build_menu(hwnd: HWND, sort: u8, restore: bool, pref: Option<usize>, auto_update: bool) {
+pub(crate) unsafe fn build_menu(hwnd: HWND, m: &MenuState) {
+    let MenuState { sort, restore, lang: pref, auto_update } = *m;
     let bar = CreateMenu();
     let (file, view, help) = (CreatePopupMenu(), CreatePopupMenu(), CreatePopupMenu());
     let add = |m: HMENU, flags: u32, id: usize, text: &str| {
@@ -576,7 +532,7 @@ pub(crate) unsafe fn build_menu(hwnd: HWND, sort: u8, restore: bool, pref: Optio
     }
     CheckMenuRadioItem(langs, IDM_LANG_BASE as u32, (IDM_LANG_BASE + lang::NAMES.len()) as u32, (IDM_LANG_BASE + pref.map_or(0, |i| i + 1)) as u32, MF_BYCOMMAND);
     add(view, MF_POPUP, langs as usize, "Language");
-    add(help, MF_STRING, IDC_HELP, "How to use");
+    add(help, MF_STRING, IDC_HOW_TO, "How to use");
     add(help, MF_STRING, IDC_DEFAULT, "Set as default viewer");
     add(help, MF_SEPARATOR, 0, "");
     add(help, MF_STRING, IDC_BUG, "Report a bug");
@@ -639,7 +595,7 @@ pub(crate) unsafe fn create_dash(hinst: HINSTANCE, class: &[u16]) {
         last_check: json_val(&settings, "LastUpdateCheck").and_then(|v| v.parse().ok()).unwrap_or(0),
         notified: json_val(&settings, "UpdateNotified").map(|v| v.trim_matches('"').to_string()).unwrap_or_default(),
     };
-    build_menu(hwnd, sort, restore, pref, upd.auto);
+    build_menu(hwnd, &MenuState { sort, restore, lang: pref, auto_update: upd.auto });
 
     let (tw, th) = (s(144.0) as usize, s(112.0) as usize);
     SendMessageW(list, LVM_SETICONSPACING, 0, ((th as isize + s(60.0) as isize) << 16) | (tw as isize + s(28.0) as isize));
