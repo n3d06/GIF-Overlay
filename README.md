@@ -70,6 +70,20 @@ To build from source:
    cargo run --release -- docs/demo1.gif
    ```
 
+### Project layout
+
+| Path | What it holds |
+|---|---|
+| `src/main.rs` | startup, single-instance hand-over, shared constants, tests |
+| `src/overlay.rs`, `src/render.rs` | the overlay window and its software rendering |
+| `src/dashboard.rs`, `src/thumbs.rs` | the dashboard window and its thumbnails |
+| `src/decode.rs` | GIF / APNG / animated WebP decoders, WIC for everything else |
+| `src/loader.rs`, `src/clipboard.rs`, `src/update.rs` | loading on worker threads, paste / copy, update check |
+| `src/settings.rs`, `src/history.rs`, `src/session.rs` | files written next to the exe |
+| `src/ids.rs`, `src/lang.rs`, `src/util.rs` | menu / timer ids, translations, small helpers |
+| `web/` | the project page (GitHub Pages) |
+| `docs/` | demo files |
+
 ## 📜 License
 Released under the MIT License. Feel free to use and customize!
 
