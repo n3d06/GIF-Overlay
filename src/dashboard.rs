@@ -220,7 +220,7 @@ pub(crate) unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM,
             SetFocus(dash().list);
             0
         }
-                WM_ERASEBKGND => {
+        WM_ERASEBKGND => {
             let mut r: RECT = mem::zeroed();
             GetClientRect(hwnd, &mut r);
             FillRect(wp as HDC, &r, GetSysColorBrush(COLOR_WINDOW));
@@ -236,47 +236,15 @@ pub(crate) unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM,
             0
         }
         WM_COMMAND if wp & 0xFFFF == IDC_HOW_TO => {
-            // one translated line per entry; "" is a blank line between the sections
-            const LINES: [&str; 20] = [
-                "OPEN AN IMAGE",
-                "\u{2022} Use File > Add image, drop a file here, or double-click a thumbnail.",
-                "\u{2022} Ctrl+V pastes a screenshot, a copied file, or an image link (http / https).",
-                "\u{2022} Right-click a thumbnail: Open, Show in folder, Copy path (Ctrl+C), Remove (Delete).",
-                "\u{2022} Right-click an empty spot for Add image and Paste.",
-                "",
-                "ON AN IMAGE",
-                "\u{2022} Drag the image to move it. Hover it to show the buttons at the top right: minimize, maximize and close.",
-                "\u{2022} Drag the right edge, bottom edge or the corner to resize. Ctrl + mouse wheel zooms.",
-                "\u{2022} Maximize stretches the image over the whole screen; click it again to restore.",
-                "\u{2022} Drop another file on the image to replace it.",
-                "\u{2022} Right-click for the menu: scale, opacity, rotate / flip, pause, lock, always on top, copy image, show in folder, replace image, dashboard, close and quit.",
-                "\u{2022} Keys: Esc closes, Space pauses, Left / Right step one frame, - / + change the speed, Up / Down change the opacity, Ctrl+C copies the image.",
-                "",
-                "LOCK WINDOW",
-                "\u{2022} A locked image is click-through, so it never gets in the way.",
-                "\u{2022} To unlock it, hold Ctrl and click the image.",
-                "",
-                "FOUND A PROBLEM?",
-                "\u{2022} Use Help > Report a bug to open the issue page on GitHub.",
-            ];
-            let text = LINES.iter().map(|l| if l.is_empty() { String::new() } else { tr(l) }).collect::<Vec<_>>().join("\n");
-            MessageBoxW(hwnd, wide(&text).as_ptr(), wide(&tr("How to use GIF Overlay")).as_ptr(), MB_OK | MB_ICONINFORMATION);
+            show_how_to(hwnd);
             0
         }
         WM_COMMAND if wp & 0xFFFF == IDC_CLEAR => {
-            let q = wide("Clear the history list?\nThe image files themselves are not deleted.");
-            if MessageBoxW(hwnd, q.as_ptr(), wide(&tr("Clear history")).as_ptr(), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES {
-                history_save(&[]);
-                refresh_dash();
-            }
+            clear_history(hwnd);
             0
         }
         WM_COMMAND if (IDM_SORT_RECENT..=IDM_SORT_LAST).contains(&(wp & 0xFFFF)) => {
-            let id = wp & 0xFFFF;
-            dash().sort = (id - IDM_SORT_RECENT) as u8;
-            CheckMenuRadioItem(GetSubMenu(GetMenu(hwnd), 1), IDM_SORT_RECENT as u32, IDM_SORT_LAST as u32, id as u32, MF_BYCOMMAND);
-            write_settings(saved_opacity()); // remember the choice
-            refresh_dash();
+            set_sort(hwnd, wp);
             0
         }
         WM_COMMAND if (IDM_LANG_BASE..=IDM_LANG_BASE + lang::NAMES.len()).contains(&(wp & 0xFFFF)) => {
@@ -284,22 +252,11 @@ pub(crate) unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM,
             0
         }
         WM_COMMAND if wp & 0xFFFF == IDC_AUTOUPD => {
-            let d = dash();
-            d.upd.auto = !d.upd.auto;
-            CheckMenuItem(GetMenu(hwnd), IDC_AUTOUPD as u32, MF_BYCOMMAND | if d.upd.auto { MF_CHECKED } else { MF_UNCHECKED });
-            write_settings(saved_opacity());
+            toggle_auto_update(hwnd);
             0
         }
         WM_COMMAND if wp & 0xFFFF == IDC_RESTORE => {
-            let d = dash();
-            d.restore = !d.restore;
-            CheckMenuItem(GetMenu(hwnd), IDC_RESTORE as u32, MF_BYCOMMAND | if d.restore { MF_CHECKED } else { MF_UNCHECKED });
-            write_settings(saved_opacity()); // remember the choice
-            if d.restore {
-                save_session(); // the windows open right now are the ones to bring back
-            } else {
-                let _ = fs::remove_file(exe_file("session.txt")); // no stale session if it is turned on later
-            }
+            toggle_restore(hwnd);
             0
         }
         WM_COMMAND if wp & 0xFFFF == IDC_PASTE => {
@@ -316,22 +273,7 @@ pub(crate) unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM,
         }
         // the Window menu (3rd of the bar) lists the open images each time it opens
         WM_INITMENUPOPUP if lp & 0xFFFF == 2 && (lp >> 16) & 0xFFFF == 0 => {
-            let m = wp as HMENU;
-            while DeleteMenu(m, 0, MF_BYPOSITION) != 0 {}
-            let names: Vec<String> = overlays().iter().take(WIN_MAX).map(|&p| (*p).path.clone()).collect();
-            if names.is_empty() {
-                AppendMenuW(m, MF_STRING | MF_GRAYED, 0, wide(&tr("No open images")).as_ptr());
-            }
-            for (i, p) in names.iter().enumerate() {
-                let name = Path::new(p).file_name().map_or(p.clone(), |n| n.to_string_lossy().into_owned());
-                AppendMenuW(m, MF_STRING, IDC_WIN_BASE + i, wide(&name.replace('&', "&&")).as_ptr()); // && = a literal &
-            }
-            AppendMenuW(m, MF_SEPARATOR, 0, null());
-            let on = if names.is_empty() { MF_GRAYED } else { 0 };
-            AppendMenuW(m, MF_STRING | on, IDC_WIN_TOGGLE, wide(&tr("Hide / show all windows	Ctrl+Alt+G")).as_ptr());
-            AppendMenuW(m, MF_STRING | on, IDC_WIN_MIN, wide(&tr("Minimize all")).as_ptr());
-            AppendMenuW(m, MF_STRING | on, IDC_WIN_RESTORE, wide(&tr("Restore all")).as_ptr());
-            AppendMenuW(m, MF_STRING | on, IDC_WIN_CLOSE, wide(&tr("Close all windows")).as_ptr());
+            fill_window_menu(wp);
             0
         }
         WM_COMMAND if (IDC_WIN_BASE..IDC_WIN_BASE + WIN_MAX).contains(&(wp & 0xFFFF)) => {
@@ -384,25 +326,7 @@ pub(crate) unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM,
             0
         }
         WM_NOTIFY => {
-            let nm = &*(lp as *const NMHDR);
-            if nm.hwndFrom == dash().list {
-                if nm.code == LVN_ITEMACTIVATE {
-                    if let Some(p) = item_path((*(lp as *const NMITEMACTIVATE)).iItem as usize) {
-                        open_gif(&p); // an unreadable file is dropped from the list once its decode fails
-                    }
-                } else if nm.code == LVN_KEYDOWN {
-                    let key = (*(lp as *const NMLVKEYDOWN)).wVKey;
-                    if key == VK_DELETE {
-                        if let Some(p) = selected().and_then(item_path) {
-                            remove_item(&p);
-                        }
-                    } else if key == 0x43 && GetAsyncKeyState(VK_CONTROL as i32) < 0 {
-                        if let Some(p) = selected().and_then(item_path) {
-                            copy_text(hwnd, &p);
-                        }
-                    }
-                }
-            }
+            on_list_notify(hwnd, lp);
             0
         }
         WM_CONTEXTMENU => {
@@ -428,14 +352,7 @@ pub(crate) unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM,
             0
         }
         WM_THUMB => {
-            let (path, thumb) = *Box::from_raw(lp as *mut (String, Option<Thumb>));
-            if let Some(item) = dash().items.iter_mut().find(|t| t.path == path) {
-                match thumb {
-                    Some(t) => *item = t,
-                    None => item.ready = true, // undecodable: keep the blank, do not retry
-                }
-                refresh_dash();
-            }
+            on_thumb(lp);
             0
         }
         WM_FETCHED => {
@@ -450,13 +367,7 @@ pub(crate) unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM,
         }
         // a second launch hands over its file (or nothing) instead of starting another process
         WM_COPYDATA => {
-            let cds = &*(lp as *const COPYDATASTRUCT);
-            if cds.cbData >= 2 {
-                let s = slice::from_raw_parts(cds.lpData as *const u16, cds.cbData as usize / 2);
-                open_gif(String::from_utf16_lossy(s).trim_end_matches('\0'));
-            } else {
-                show_dash();
-            }
+            on_copydata(lp);
             1
         }
         WM_CLOSE => {
@@ -473,6 +384,131 @@ pub(crate) unsafe extern "system" fn dash_proc(hwnd: HWND, msg: u32, wp: WPARAM,
             0
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+unsafe fn show_how_to(hwnd: HWND) {
+    // one translated line per entry; "" is a blank line between the sections
+    const LINES: [&str; 20] = [
+        "OPEN AN IMAGE",
+        "\u{2022} Use File > Add image, drop a file here, or double-click a thumbnail.",
+        "\u{2022} Ctrl+V pastes a screenshot, a copied file, or an image link (http / https).",
+        "\u{2022} Right-click a thumbnail: Open, Show in folder, Copy path (Ctrl+C), Remove (Delete).",
+        "\u{2022} Right-click an empty spot for Add image and Paste.",
+        "",
+        "ON AN IMAGE",
+        "\u{2022} Drag the image to move it. Hover it to show the buttons at the top right: minimize, maximize and close.",
+        "\u{2022} Drag the right edge, bottom edge or the corner to resize. Ctrl + mouse wheel zooms.",
+        "\u{2022} Maximize stretches the image over the whole screen; click it again to restore.",
+        "\u{2022} Drop another file on the image to replace it.",
+        "\u{2022} Right-click for the menu: scale, opacity, rotate / flip, pause, lock, always on top, copy image, show in folder, replace image, dashboard, close and quit.",
+        "\u{2022} Keys: Esc closes, Space pauses, Left / Right step one frame, - / + change the speed, Up / Down change the opacity, Ctrl+C copies the image.",
+        "",
+        "LOCK WINDOW",
+        "\u{2022} A locked image is click-through, so it never gets in the way.",
+        "\u{2022} To unlock it, hold Ctrl and click the image.",
+        "",
+        "FOUND A PROBLEM?",
+        "\u{2022} Use Help > Report a bug to open the issue page on GitHub.",
+    ];
+    let text = LINES.iter().map(|l| if l.is_empty() { String::new() } else { tr(l) }).collect::<Vec<_>>().join("\n");
+    MessageBoxW(hwnd, wide(&text).as_ptr(), wide(&tr("How to use GIF Overlay")).as_ptr(), MB_OK | MB_ICONINFORMATION);
+}
+
+unsafe fn clear_history(hwnd: HWND) {
+    let q = wide("Clear the history list?\nThe image files themselves are not deleted.");
+    if MessageBoxW(hwnd, q.as_ptr(), wide(&tr("Clear history")).as_ptr(), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES {
+        history_save(&[]);
+        refresh_dash();
+    }
+}
+
+unsafe fn set_sort(hwnd: HWND, wp: WPARAM) {
+    let id = wp & 0xFFFF;
+    dash().sort = (id - IDM_SORT_RECENT) as u8;
+    CheckMenuRadioItem(GetSubMenu(GetMenu(hwnd), 1), IDM_SORT_RECENT as u32, IDM_SORT_LAST as u32, id as u32, MF_BYCOMMAND);
+    write_settings(saved_opacity()); // remember the choice
+    refresh_dash();
+}
+
+unsafe fn toggle_auto_update(hwnd: HWND) {
+    let d = dash();
+    d.upd.auto = !d.upd.auto;
+    CheckMenuItem(GetMenu(hwnd), IDC_AUTOUPD as u32, MF_BYCOMMAND | if d.upd.auto { MF_CHECKED } else { MF_UNCHECKED });
+    write_settings(saved_opacity());
+}
+
+unsafe fn toggle_restore(hwnd: HWND) {
+    let d = dash();
+    d.restore = !d.restore;
+    CheckMenuItem(GetMenu(hwnd), IDC_RESTORE as u32, MF_BYCOMMAND | if d.restore { MF_CHECKED } else { MF_UNCHECKED });
+    write_settings(saved_opacity()); // remember the choice
+    if d.restore {
+        save_session(); // the windows open right now are the ones to bring back
+    } else {
+        let _ = fs::remove_file(exe_file("session.txt")); // no stale session if it is turned on later
+    }
+}
+
+unsafe fn fill_window_menu(wp: WPARAM) {
+    let m = wp as HMENU;
+    while DeleteMenu(m, 0, MF_BYPOSITION) != 0 {}
+    let names: Vec<String> = overlays().iter().take(WIN_MAX).map(|&p| (*p).path.clone()).collect();
+    if names.is_empty() {
+        AppendMenuW(m, MF_STRING | MF_GRAYED, 0, wide(&tr("No open images")).as_ptr());
+    }
+    for (i, p) in names.iter().enumerate() {
+        let name = Path::new(p).file_name().map_or(p.clone(), |n| n.to_string_lossy().into_owned());
+        AppendMenuW(m, MF_STRING, IDC_WIN_BASE + i, wide(&name.replace('&', "&&")).as_ptr()); // && = a literal &
+    }
+    AppendMenuW(m, MF_SEPARATOR, 0, null());
+    let on = if names.is_empty() { MF_GRAYED } else { 0 };
+    AppendMenuW(m, MF_STRING | on, IDC_WIN_TOGGLE, wide(&tr("Hide / show all windows	Ctrl+Alt+G")).as_ptr());
+    AppendMenuW(m, MF_STRING | on, IDC_WIN_MIN, wide(&tr("Minimize all")).as_ptr());
+    AppendMenuW(m, MF_STRING | on, IDC_WIN_RESTORE, wide(&tr("Restore all")).as_ptr());
+    AppendMenuW(m, MF_STRING | on, IDC_WIN_CLOSE, wide(&tr("Close all windows")).as_ptr());
+}
+
+unsafe fn on_list_notify(hwnd: HWND, lp: LPARAM) {
+    let nm = &*(lp as *const NMHDR);
+    if nm.hwndFrom == dash().list {
+        if nm.code == LVN_ITEMACTIVATE {
+            if let Some(p) = item_path((*(lp as *const NMITEMACTIVATE)).iItem as usize) {
+                open_gif(&p); // an unreadable file is dropped from the list once its decode fails
+            }
+        } else if nm.code == LVN_KEYDOWN {
+            let key = (*(lp as *const NMLVKEYDOWN)).wVKey;
+            if key == VK_DELETE {
+                if let Some(p) = selected().and_then(item_path) {
+                    remove_item(&p);
+                }
+            } else if key == 0x43 && GetAsyncKeyState(VK_CONTROL as i32) < 0 {
+                if let Some(p) = selected().and_then(item_path) {
+                    copy_text(hwnd, &p);
+                }
+            }
+        }
+    }
+}
+
+unsafe fn on_thumb(lp: LPARAM) {
+    let (path, thumb) = *Box::from_raw(lp as *mut (String, Option<Thumb>));
+    if let Some(item) = dash().items.iter_mut().find(|t| t.path == path) {
+        match thumb {
+            Some(t) => *item = t,
+            None => item.ready = true, // undecodable: keep the blank, do not retry
+        }
+        refresh_dash();
+    }
+}
+
+unsafe fn on_copydata(lp: LPARAM) {
+    let cds = &*(lp as *const COPYDATASTRUCT);
+    if cds.cbData >= 2 {
+        let s = slice::from_raw_parts(cds.lpData as *const u16, cds.cbData as usize / 2);
+        open_gif(String::from_utf16_lossy(s).trim_end_matches('\0'));
+    } else {
+        show_dash();
     }
 }
 
