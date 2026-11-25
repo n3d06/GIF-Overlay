@@ -5,17 +5,15 @@ edition = "2021"
 description = "Minimalist GIF & Image Viewer"
 authors = ["DuyXYZ"]
 
-[workspace]
-members = ["codec"]
-default-members = [".", "codec"]
-
 [[bin]]
 name = "GIF-Overlay"
 path = "src/main.rs"
 
 [dependencies]
+gif = { version = "0.13", default-features = false, features = ["std"] }
+image-webp = { version = "0.2.4", default-features = false }
 png = { version = "0.18.1", default-features = false }
-windows = { version = "0.62.2", features = ["Win32_System_Com", "Win32_System_Com_Urlmon", "Win32_Foundation"] }
+windows = { version = "0.62.2", features = ["Win32_Graphics_Imaging", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Com_Urlmon", "Win32_System_Variant","Win32_Foundation"] }
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Globalization",
@@ -43,9 +41,3 @@ lto = true
 codegen-units = 1
 panic = "unwind"
 strip = true
-
-# cargo build --profile release-debug: optimized but with .pdb symbols, to debug exe + DLL together
-[profile.release-debug]
-inherits = "release"
-strip = false
-debug = true
